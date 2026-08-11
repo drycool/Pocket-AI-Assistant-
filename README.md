@@ -1,5 +1,9 @@
 # Pocket AI Assistant (USB Portable Edition)
 
+[![Release](https://img.shields.io/github/v/release/drycool/Pocket-AI-Assistant-)](https://github.com/drycool/Pocket-AI-Assistant-/releases/latest)
+
+> **Скачать готовый `agent.exe` без компиляции:** [последний релиз](https://github.com/drycool/Pocket-AI-Assistant-/releases/latest/download/agent.exe)
+
 Автономный портативный комплекс для выездных системных администраторов, сервисных инженеров и IT-специалистов. Предназначен для быстрой экспресс-диагностики, поиска неисправностей и устранения сбоев на гостевых ПК под управлением Windows прямо с USB-флешки.
 
 В основе агента — высокопроизводительный бинарник на **Go** (без внешних зависимостей), взаимодействующий с **Gemini 2.5 Flash REST API**, с возможностью автоматического фонового сбора метрик Windows через PowerShell и генерации итоговых инженерных отчетов в формате **Markdown**.

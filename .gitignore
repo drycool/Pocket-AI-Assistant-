@@ -1,0 +1,16 @@
+# Конфигурации и ключи
+Data/config.json
+
+# Данные сессий и дампы систем
+Data/sessions/*.json
+Data/logs/*.txt
+Data/reports/*.md
+
+# Кеш и загрузки браузера
+Data/downloads/*
+Data/firefox/cache/*
+
+# Исполняемые файлы и артефакты Python
+*.exe
+*.pyc
+__pycache__/

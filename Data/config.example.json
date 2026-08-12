@@ -1,0 +1,38 @@
+{
+  "providers": [
+    {
+      "name": "Gemini-Free",
+      "type": "gemini",
+      "api_key": "AIzaSy...",
+      "model": "gemini-2.5-flash"
+    },
+    {
+      "name": "DeepSeek-Paid",
+      "type": "openai",
+      "base_url": "https://api.deepseek.com/v1",
+      "api_key": "sk-ds-...",
+      "model": "deepseek-v4-flash"
+    },
+    {
+      "name": "OpenRouter-Paid",
+      "type": "openai",
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key": "sk-or-...",
+      "model": "anthropic/claude-3.5-haiku"
+    },
+    {
+      "name": "Groq",
+      "type": "openai",
+      "base_url": "https://api.groq.com/openai/v1",
+      "api_key": "gsk_...",
+      "model": "llama-3.3-70b-versatile"
+    },
+    {
+      "name": "Local-Ollama",
+      "type": "openai",
+      "base_url": "http://100.x.y.z:11434/v1",
+      "api_key": "ollama",
+      "model": "qwen2.5-coder"
+    }
+  ]
+}

@@ -16,15 +16,8 @@ import (
 	"time"
 )
 
-type GeminiRequest struct {
-	Contents          []Content          `json:"contents"`
-	SystemInstruction *SystemInstruction `json:"system_instruction,omitempty"`
-}
-
-type SystemInstruction struct {
-	Parts []Part `json:"parts"`
-}
-
+// Content — универсальное сообщение в истории (роль + текст).
+// Для OpenAI-формата роль "model" конвертируется в "assistant".
 type Content struct {
 	Role  string `json:"role"`
 	Parts []Part `json:"parts"`
@@ -32,6 +25,17 @@ type Content struct {
 
 type Part struct {
 	Text string `json:"text"`
+}
+
+// --- Gemini-специфичные структуры (type: "gemini") ---
+
+type GeminiRequest struct {
+	Contents          []Content          `json:"contents"`
+	SystemInstruction *SystemInstruction `json:"system_instruction,omitempty"`
+}
+
+type SystemInstruction struct {
+	Parts []Part `json:"parts"`
 }
 
 type GeminiResponse struct {
@@ -45,14 +49,47 @@ type GeminiResponse struct {
 	} `json:"error,omitempty"`
 }
 
+// --- OpenAI-совместимые структуры (type: "openai", /v1/chat/completions) ---
+
+type OpenAIMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type OpenAIRequest struct {
+	Model    string          `json:"model"`
+	Messages []OpenAIMessage `json:"messages"`
+}
+
+type OpenAIResponse struct {
+	Choices []struct {
+		Message struct {
+			Content string `json:"content"`
+		} `json:"message"`
+	} `json:"choices"`
+	Error *struct {
+		Message string `json:"message"`
+	} `json:"error,omitempty"`
+}
+
 type SessionData struct {
 	SessionID string    `json:"session_id"`
 	UpdatedAt string    `json:"updated_at"`
 	History   []Content `json:"history"`
 }
 
+// Provider — один источник модели в приоритетном списке.
+// Type: "gemini" (нативный REST) или "openai" (стандарт /v1/chat/completions).
+type Provider struct {
+	Name    string `json:"name"`
+	Type    string `json:"type"`               // "gemini" | "openai"
+	BaseURL string `json:"base_url,omitempty"` // для openai: https://api.deepseek.com/v1
+	APIKey  string `json:"api_key"`
+	Model   string `json:"model"`
+}
+
 type Config struct {
-	GeminiAPIKey string `json:"GEMINI_API_KEY"`
+	Providers []Provider `json:"providers"`
 }
 
 var (
@@ -62,6 +99,7 @@ var (
 	configFile  string
 	reportsDir  string
 	logsDir     string
+	providers   []Provider
 )
 
 const SystemPrompt = "Ты — карманный AI-инженер и диагност систем Windows/Linux. " +
@@ -85,44 +123,56 @@ func initPaths() {
 	_ = os.MkdirAll(logsDir, 0755)
 }
 
-func getAPIKey(reader *bufio.Reader) string {
-	apiKey := os.Getenv("GEMINI_API_KEY")
-	if apiKey != "" {
-		return apiKey
+// loadProviders читает приоритетный список провайдеров из Data/config.json.
+// Если список пуст — принимает GEMINI_API_KEY (ENV/файл/ввод) как резерв.
+func loadProviders(reader *bufio.Reader) []Provider {
+	// 1. Прямой ENV-ключ Gemini как провайдер-одиночка.
+	if env := strings.TrimSpace(os.Getenv("GEMINI_API_KEY")); env != "" {
+		return []Provider{{Name: "Gemini-ENV", Type: "gemini", APIKey: env, Model: "gemini-2.5-flash"}}
 	}
 
+	// 2. Список провайдеров из config.json.
 	if data, err := os.ReadFile(configFile); err == nil {
 		var cfg Config
-		if err := json.Unmarshal(data, &cfg); err == nil && strings.TrimSpace(cfg.GeminiAPIKey) != "" {
-			return strings.TrimSpace(cfg.GeminiAPIKey)
+		if err := json.Unmarshal(data, &cfg); err == nil && len(cfg.Providers) > 0 {
+			valid := cfg.Providers[:0]
+			for _, p := range cfg.Providers {
+				if strings.TrimSpace(p.APIKey) != "" && strings.TrimSpace(p.Model) != "" {
+					valid = append(valid, p)
+				}
+			}
+			if len(valid) > 0 {
+				return valid
+			}
 		}
 	}
 
+	// 3. Резерв: запрашиваем Gemini-ключ и создаем одиночного провайдера.
+	fmt.Println("\n[!] В Data/config.json нет списка провайдеров.")
+	fmt.Println("    (Формат: {\"providers\":[{\"name\",\"type\",\"base_url\",\"api_key\",\"model\"}]})")
+	var apiKey string
 	for {
-		fmt.Println("\n[!] GEMINI_API_KEY не найден.")
-		fmt.Print("Введите ваш Gemini API Key: ")
+		fmt.Print("Введите Gemini API Key (или другого провайдера): ")
 		apiKey, _ = reader.ReadString('\n')
 		apiKey = strings.TrimSpace(apiKey)
-
 		if apiKey != "" {
 			break
 		}
 		fmt.Println("[ERROR] Ключ не может быть пустым!")
 	}
 
-	fmt.Print("Сохранить ключ в Data/config.json на флешке? (y/n) [y]: ")
-	saveChoice, _ := reader.ReadString('\n')
-	saveChoice = strings.TrimSpace(strings.ToLower(saveChoice))
-
-	if saveChoice == "" || saveChoice == "y" {
-		cfg := Config{GeminiAPIKey: apiKey}
+	fmt.Print("Добавить провайдер (Gemini) в Data/config.json? (y/n) [y]: ")
+	choice, _ := reader.ReadString('\n')
+	choice = strings.TrimSpace(strings.ToLower(choice))
+	if choice == "" || choice == "y" {
+		cfg := Config{Providers: []Provider{{Name: "Gemini-Free", Type: "gemini", APIKey: apiKey, Model: "gemini-2.5-flash"}}}
 		if cfgData, err := json.MarshalIndent(cfg, "", "  "); err == nil {
 			_ = os.WriteFile(configFile, cfgData, 0644)
-			fmt.Println("[OK] Ключ сохранен в Data/config.json")
+			fmt.Println("[OK] Провайдер сохранен в Data/config.json")
 		}
 	}
 
-	return apiKey
+	return []Provider{{Name: "Gemini-Free", Type: "gemini", APIKey: apiKey, Model: "gemini-2.5-flash"}}
 }
 
 func atomicSaveSession(sessionFile string, sessionID string, history []Content) {
@@ -184,7 +234,7 @@ if ($events.Count -gt 0) { foreach ($e in $events) { Write-Output $e } } else { 
 	return rawOutput, logPath
 }
 
-func generateReport(apiKey string, sessionID string, history []Content) {
+func generateReport(sessionID string, history []Content) {
 	fmt.Println("\n[*] Генерация итогового отчета по сессии...")
 
 	reportPrompt := "На основе всей истории нашего диалога выше, сформируй структурированный итоговый технический отчет " +
@@ -203,7 +253,7 @@ func generateReport(apiKey string, sessionID string, history []Content) {
 		Parts: []Part{{Text: reportPrompt}},
 	})
 
-	respText, err := sendGeminiRequest(apiKey, reportReqHistory)
+	respText, err := sendMessage(reportReqHistory, SystemPrompt)
 	if err != nil {
 		fmt.Printf("[ERROR] Ошибка при генерации отчета: %v\n", err)
 		return
@@ -290,13 +340,101 @@ func selectOrCreateSession(reader *bufio.Reader) (string, string, []Content) {
 	return sessionFile, sessionID, history
 }
 
-func sendGeminiRequest(apiKey string, history []Content) (string, error) {
-	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=%s", apiKey)
+// sendMessage — единая абстракция. Пытается провайдеров по порядку и при
+// ошибке лимита/перегрузки/сети автоматически уходит на следующий.
+func sendMessage(history []Content, systemPrompt string) (string, error) {
+	var errs []string
+	for _, p := range providers {
+		text, err := callProvider(p, history, systemPrompt)
+		if err == nil {
+			return text, nil
+		}
+		errs = append(errs, fmt.Sprintf("[%s] %v", p.Name, err))
+	}
+	return "", fmt.Errorf("все провайдеры недоступны: %s", strings.Join(errs, " | "))
+}
+
+func callProvider(p Provider, history []Content, systemPrompt string) (string, error) {
+	switch strings.ToLower(p.Type) {
+	case "openai":
+		return callOpenAI(p, history, systemPrompt)
+	default:
+		return callGemini(p, history, systemPrompt)
+	}
+}
+
+// callOpenAI — стандарт /v1/chat/completions (DeepSeek, Groq, OpenRouter, Ollama...).
+func callOpenAI(p Provider, history []Content, systemPrompt string) (string, error) {
+	baseURL := strings.TrimRight(p.BaseURL, "/")
+	if baseURL == "" {
+		return "", fmt.Errorf("пустой base_url для провайдера %s", p.Name)
+	}
+	url := baseURL + "/chat/completions"
+
+	messages := []OpenAIMessage{{Role: "system", Content: systemPrompt}}
+	for _, c := range history {
+		role := "user"
+		if c.Role == "model" {
+			role = "assistant"
+		}
+		text := ""
+		if len(c.Parts) > 0 {
+			text = c.Parts[0].Text
+		}
+		messages = append(messages, OpenAIMessage{Role: role, Content: text})
+	}
+
+	reqBody, err := json.Marshal(OpenAIRequest{Model: p.Model, Messages: messages})
+	if err != nil {
+		return "", err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewBuffer(reqBody))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+p.APIKey)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, _ := io.ReadAll(resp.Body)
+
+	// Лимит/перегрузка — сигнал для fallback на следующий провайдер.
+	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
+		return "", fmt.Errorf("лимит/перегрузка (HTTP %d)", resp.StatusCode)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(bodyBytes)))
+	}
+
+	var oaiResp OpenAIResponse
+	if err := json.Unmarshal(bodyBytes, &oaiResp); err != nil {
+		return "", err
+	}
+	if oaiResp.Error != nil {
+		return "", fmt.Errorf("API Error: %s", oaiResp.Error.Message)
+	}
+	if len(oaiResp.Choices) > 0 && strings.TrimSpace(oaiResp.Choices[0].Message.Content) != "" {
+		return oaiResp.Choices[0].Message.Content, nil
+	}
+
+	return "Пустой ответ от модели.", nil
+}
+
+// callGemini — нативный REST Gemini (type: "gemini").
+func callGemini(p Provider, history []Content, systemPrompt string) (string, error) {
+	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s",
+		p.Model, p.APIKey)
 
 	reqBody := GeminiRequest{
 		Contents: history,
 		SystemInstruction: &SystemInstruction{
-			Parts: []Part{{Text: SystemPrompt}},
+			Parts: []Part{{Text: systemPrompt}},
 		},
 	}
 
@@ -312,6 +450,11 @@ func sendGeminiRequest(apiKey string, history []Content) (string, error) {
 	defer resp.Body.Close()
 
 	bodyBytes, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
+		return "", fmt.Errorf("лимит/перегрузка (HTTP %d)", resp.StatusCode)
+	}
+
 	var geminiResp GeminiResponse
 	if err := json.Unmarshal(bodyBytes, &geminiResp); err != nil {
 		return "", err
@@ -332,7 +475,12 @@ func main() {
 	initPaths()
 	reader := bufio.NewReader(os.Stdin)
 
-	apiKey := getAPIKey(reader)
+	providers = loadProviders(reader)
+	fmt.Printf("[OK] Провайдеров в пуле: %d (порядок = приоритет)\n", len(providers))
+	for i, p := range providers {
+		fmt.Printf("     [%d] %s (%s/%s)\n", i+1, p.Name, p.Type, p.Model)
+	}
+
 	sessionFile, sessionID, history := selectOrCreateSession(reader)
 
 	fmt.Printf("\n--- АГЕНТ АКТИВЕН (Сессия: %s) ---\n", sessionID)
@@ -356,7 +504,7 @@ func main() {
 		}
 
 		if lower == "/report" {
-			generateReport(apiKey, sessionID, history)
+			generateReport(sessionID, history)
 			continue
 		}
 
@@ -365,22 +513,25 @@ func main() {
 			updateMsg := fmt.Sprintf("Результаты повторной диагностики ПК:\n\n```text\n%s\n```", diagData)
 			history = append(history, Content{Role: "user", Parts: []Part{{Text: updateMsg}}})
 
-			fmt.Print("\nGemini > Анализирую обновленный дамп...")
-			respText, err := sendGeminiRequest(apiKey, history)
-			fmt.Print("\rGemini > ")
+			fmt.Print("\nAI > Анализирую обновленный дамп...")
+			respText, err := sendMessage(history, SystemPrompt)
+			fmt.Print("\rAI > ")
 			if err == nil {
 				fmt.Printf("%s\n\n", respText)
 				history = append(history, Content{Role: "model", Parts: []Part{{Text: respText}}})
 				atomicSaveSession(sessionFile, sessionID, history)
+			} else {
+				fmt.Printf("[ОШИБКА]: %v\n\n", err)
+				history = history[:len(history)-1]
 			}
 			continue
 		}
 
 		history = append(history, Content{Role: "user", Parts: []Part{{Text: userInput}}})
 
-		fmt.Print("\nGemini > Думаю...")
-		respText, err := sendGeminiRequest(apiKey, history)
-		fmt.Print("\rGemini > ")
+		fmt.Print("\nAI > Думаю...")
+		respText, err := sendMessage(history, SystemPrompt)
+		fmt.Print("\rAI > ")
 
 		if err != nil {
 			fmt.Printf("[ОШИБКА]: %v\n\n", err)

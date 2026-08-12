@@ -1,5 +1,5 @@
 @echo off
-chcp 65001 > nul
+chcp 65001
 title Pocket AI Assistant — Control Center
 
 setlocal
@@ -55,7 +55,7 @@ if exist "%FF_BAT%" (
     echo [ERROR] Не найден %FF_BAT%
     pause
 )
-timeout /t 2 > nul
+timeout /t 2
 goto MENU
 
 :OPEN_REPORTS

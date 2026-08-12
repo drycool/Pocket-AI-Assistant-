@@ -4,11 +4,10 @@ title Pocket AI Assistant — Control Center
 
 setlocal
 set "USB_DRIVE=%~dp0"
-set "AGENT_EXE=%USB_DRIVE%Agent\agent.exe"
-set "AGENT_PY=%USB_DRIVE%Agent\agent.py"
+set "AGENT_BAT=%USB_DRIVE%bin\agent.bat"
+set "FF_BAT=%USB_DRIVE%bin\ff-portable.bat"
 set "REPORTS_DIR=%USB_DRIVE%Data\reports"
 set "LOGS_DIR=%USB_DRIVE%Data\logs"
-set "FF_LAUNCH=%USB_DRIVE%bin\ff-portable.bat"
 
 :MENU
 cls
@@ -34,30 +33,27 @@ goto MENU
 cls
 echo [*] Запуск AI-Агента...
 echo ---------------------------------------------------
-if exist "%AGENT_EXE%" (
-    "%AGENT_EXE%"
-) else if exist "%AGENT_PY%" (
-    echo [!] agent.exe не найден. Запуск Python-версии...
-    python "%AGENT_PY%"
+if exist "%AGENT_BAT%" (
+    call "%AGENT_BAT%"
 ) else (
-    echo [ERROR] Ни agent.exe, ни agent.py не найдены в папке Agent!
-    echo Скомпилируйте агент: cd Agent ^&^& go build -ldflags="-s -w" -o agent.exe main.go
+    echo [ERROR] Не найден %AGENT_BAT%
     pause
 )
 echo.
 echo ---------------------------------------------------
-echo [OK] Работа агента завершена.
+echo [OK] Работа завершена.
 pause
 goto MENU
 
 :RUN_FIREFOX
 cls
-echo [*] Запуск Firefox Portable (изолированный профиль на USB)...
-if exist "%FF_LAUNCH%" (
-    call "%FF_LAUNCH%"
-    echo [OK] Браузер запущен в отдельном процессе.
+echo [*] Запуск Firefox Portable...
+if exist "%FF_BAT%" (
+    call "%FF_BAT%"
+    echo [OK] Браузер запущен.
 ) else (
-    echo [ERROR] Лаунчер браузера не найден: "%FF_LAUNCH%"
+    echo [ERROR] Не найден %FF_BAT%
+    pause
 )
 timeout /t 2 > nul
 goto MENU

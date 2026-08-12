@@ -1,3 +1,3 @@
 @echo off
-REM Top-level launcher for the AI agent
+chcp 65001 > nul
 call "%~dp0bin\agent.bat" %*

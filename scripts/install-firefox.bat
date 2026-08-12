@@ -1,47 +1,40 @@
 @echo off
-REM =============================================================
-REM  Bootstrap: install Portable Firefox into Tools\FirefoxPortable
-REM
-REM  Two modes:
-REM   1. Put a PortableApps Firefox zip into the same folder as this
-REM      script (e.g. FirefoxPortable_xx_English.paf.exe or .zip),
-REM      or
-REM   2. Set FFURL below to the official download link, and 7z (or
-REM      tar) must be available to extract.
-REM
-REM  After install, firefox.exe must end up at:
-REM     Tools\FirefoxPortable\firefox.exe
-REM =============================================================
-setlocal
+title Installation Firefox Portable
 
-set "ROOT=%~dp0.."
-set "TARGET=%ROOT%\Tools\FirefoxPortable"
-set "FFURL="
+set "ROOT_DIR=%~dp0.."
+set "TOOLS_DIR=%ROOT_DIR%\Tools\FirefoxPortable"
+set "TEMP_ZIP=%ROOT_DIR%\Data\ff_temp.zip"
 
-if exist "%TARGET%\firefox.exe" (
-  echo [OK] Portable Firefox already installed.
-  exit /b 0
-)
+echo ===================================================
+echo       USTANOVKA FIREFOX PORTABLE
+echo ===================================================
 
-REM --- Try to find a downloaded package next to this script ---
-pushd "%~dp0"
-for %%f in (FirefoxPortable_*.paf.exe FirefoxPortable_*.exe Firefox*.zip *.paf.exe) do (
-  if exist "%%f" set "PKG=%%f"
-)
-popd
+if not exist "%ROOT_DIR%\Data" mkdir "%ROOT_DIR%\Data"
+if not exist "%TOOLS_DIR%" mkdir "%TOOLS_DIR%"
 
-if defined PKG (
-  echo [..] Extracting %PKG% ...
-  "%PKG%" /S /D=%TARGET%
-) else (
-  echo [INFO] No Firefox package found in %~dp0
-  echo        Download Firefox Portable (portableapps.com) and run this script again,
-  echo        OR place the installer zip in this folder.
-)
+echo [*] Skachivanie Firefox Portable...
+powershell -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; $web = New-Object System.Net.WebClient; $web.Headers.Add('User-Agent', 'Mozilla/5.0'); $web.DownloadFile('https://download.mozilla.org/?product=firefox-latest-ssl&os=win64&lang=en-US', '%TEMP_ZIP%')"
 
-if exist "%TARGET%\firefox.exe" (
-  echo [OK] Installed to %TARGET%
-) else (
-  echo [WARN] firefox.exe not found yet. Place Portable Firefox in %TARGET%
-)
+if not exist "%TEMP_ZIP%" goto ERROR_DL
+
+echo [*] Podgotovka papki Tools...
+echo [INFO] Skachan oficial'nyj ustonavshik Firefox.
+echo [INFO] Zapuskaem ustanovku. Ukazhite put' raspakovki:
+echo %TOOLS_DIR%
+echo ---------------------------------------------------
+
+"%TEMP_ZIP%"
+
+if exist "%TEMP_ZIP%" del "%TEMP_ZIP%"
+
+echo ===================================================
+echo [OK] Ustanovka zavershena!
+echo ===================================================
+pause
 exit /b 0
+
+:ERROR_DL
+echo.
+echo [ERROR] Ne udalos' skachat' fajl! Prover'te soedinenie s Set'yu.
+pause
+exit /b 1

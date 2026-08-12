@@ -1,43 +1,21 @@
 @echo off
-REM =============================================================
-REM  Portable Firefox - zero-trace launch (internal logic)
-REM  Usage: call bin\ff-portable.bat
-REM  Uses drive letter of this script so all data stays on USB.
-REM =============================================================
-setlocal
 
-set "SELF=%~dp0"                 REM ...\bin\
-set "ROOT=%SELF%.."
-set "FF=%ROOT%\Tools\FirefoxPortable\firefox.exe"
-set "PROF=%ROOT%\Data\firefox\profile"
-set "CACHE=%ROOT%\Data\firefox\cache"
-set "DLDIR=%ROOT%\Data\downloads"
+set "BIN_DIR=%~dp0"
+set "TOOLS_DIR=%BIN_DIR%..\Tools\FirefoxPortable"
+set "PROFILE_DIR=%BIN_DIR%..\Data\firefox"
 
-if not exist "%FF%" (
-  echo [ERROR] Firefox not found: %FF%
-  echo         Run scripts\install-firefox.bat first.
-  exit /b 1
+if not exist "%PROFILE_DIR%" mkdir "%PROFILE_DIR%"
+
+if exist "%TOOLS_DIR%\FirefoxPortable.exe" (
+    start "" "%TOOLS_DIR%\FirefoxPortable.exe" -profile "%PROFILE_DIR%" -no-remote
+) else if exist "%TOOLS_DIR%\firefox.exe" (
+    start "" "%TOOLS_DIR%\firefox.exe" -profile "%PROFILE_DIR%" -no-remote
+) else if exist "%TOOLS_DIR%\App\Firefox64\firefox.exe" (
+    start "" "%TOOLS_DIR%\App\Firefox64\firefox.exe" -profile "%PROFILE_DIR%" -no-remote
+) else if exist "%TOOLS_DIR%\App\Firefox\firefox.exe" (
+    start "" "%TOOLS_DIR%\App\Firefox\firefox.exe" -profile "%PROFILE_DIR%" -no-remote
+) else (
+    echo [ERROR] firefox.exe ili FirefoxPortable.exe ne najden v Tools\FirefoxPortable\
+    echo Prover'te raspolozhenie fajlov v papke Tools!
+    pause
 )
-
-REM Ensure writable folders exist (works from any drive letter)
-if not exist "%PROF%"  mkdir "%PROF%"
-if not exist "%CACHE%" mkdir "%CACHE%"
-if not exist "%DLDIR%" mkdir "%DLDIR%"
-
-REM Inject USB paths into user.js (replace X:\ placeholder with real drive)
-set "USERJS=%ROOT%\Data\firefox\user.js"
-powershell -NoProfile -Command ^
-  "$p='%USERJS%'; $c=Get-Content $p -Raw; " ^
-  "$c=$c -replace 'browser\.download\.dir\", \"[^\"]*\"','browser.download.dir", "%DLDIR%\"'; " ^
-  "$c=$c -replace 'X:\\Data\\\\downloads','%DLDIR%'; Set-Content $p $c" >nul 2>&1
-
-REM Override cache dir via profile (Firefox resolves profile-local paths)
-if not exist "%PROF%\cache2" (
-  mkdir "%PROF%\cache2" >nul 2>&1
-)
-
-REM Launch isolated portable profile
-start "" "%FF%" -profile "%PROF%" -no-remote
-
-endlocal
-exit /b 0

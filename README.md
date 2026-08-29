@@ -123,7 +123,8 @@ admin-stick/
 ├── bin\check-ollama.bat   # проверка связи + автоподстройка конфига
 ├── Agent\agent.exe        # собранный бинарник (~5 МБ) — в git НЕ хранится!
 ├── Data\config.json       # создается/переключается автоматически
-├── Data\config.pi.json          # шаблон: Raspberry Pi 192.168.0.10 (шлюз)
+├── Data\config.pi.json          # шаблон: Raspberry Pi 192.168.0.10 (шлюз, LAN)
+├── Data\config.pi-ts.json       # шаблон: Raspberry Pi 100.124.79.91 (шлюз, Tailscale)
 ├── Data\config.tailscale.json   # шаблон: Tailscale 100.121.254.115
 ├── Data\config.lan.json         # шаблон: LAN 192.168.0.87
 ├── scripts\check-ollama.ps1     # TCP-проверка порта Ollama (вызывается из .bat)
@@ -145,7 +146,7 @@ admin-stick/
 2. `START.bat` увидит Tailscale-адрес `100.121.254.115` (или Tailscale-адрес Pi `100.124.79.91`) и переключит конфиг на него.
 3. Работает из любой точки мира (при отсутствии прямого соединения — через relay Tailscale).
 
-**Приоритет адресов в `check-ollama.bat`**: Raspberry Pi (`192.168.0.10`) → gpu2 Tailscale (`100.121.254.115`) → gpu2 LAN (`192.168.0.87`).
+**Приоритет адресов в `check-ollama.bat`**: Raspberry Pi LAN (`192.168.0.10`) → Raspberry Pi Tailscale (`100.124.79.91`) → gpu2 Tailscale (`100.121.254.115`) → gpu2 LAN (`192.168.0.87`). Pi-адреса всегда в приоритете: шлюз работает 24/7 и сам будит gpu2.
 
 **Проверка вручную**: пункт **[5]** в `START.bat` — покажет, какой адрес доступен, и переключит конфиг.
 

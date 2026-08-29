@@ -11,4 +11,4 @@ if exist "%AGENT_EXE%" (
 ) else (
     echo [ERROR] agent.exe ili agent.py ne najdeny!
     pause
-)
+)

@@ -1,6 +1,6 @@
 @echo off
 chcp 65001
-title Pocket AI Assistant — Control Center
+title Pocket AI Assistant - Control Center
 
 setlocal
 set "USB_DRIVE=%~dp0"
@@ -13,7 +13,7 @@ set "LOGS_DIR=%USB_DRIVE%Data\logs"
 :MENU
 cls
 echo ===================================================
-echo       POCKET AI ASSISTANT — CONTROL CENTER
+echo       POCKET AI ASSISTANT - CONTROL CENTER
 echo ===================================================
 echo  [1] Запустить Go-Агент (Диагностика и Чат)
 echo  [2] Запустить Firefox Portable (Gemini Web UI)
@@ -35,20 +35,22 @@ goto MENU
 :RUN_AGENT
 cls
 echo [*] Проверка доступа к локальной модели (Ollama gpu2)...
-if exist "%CHECK_BAT%" (
-    call "%CHECK_BAT%" AUTO
-) else (
-    echo [WARN] Не найден %CHECK_BAT%
-)
+if exist "%CHECK_BAT%" goto RUN_CHECK
+echo [WARN] Не найден %CHECK_BAT%
+goto RUN_GO
+:RUN_CHECK
+call "%CHECK_BAT%" AUTO
+:RUN_GO
 echo ---------------------------------------------------
 echo [*] Запуск AI-Агента...
 echo ---------------------------------------------------
-if exist "%AGENT_BAT%" (
-    call "%AGENT_BAT%"
-) else (
-    echo [ERROR] Не найден %AGENT_BAT%
-    pause
-)
+if not exist "%AGENT_BAT%" goto RUN_NO_AGENT
+call "%AGENT_BAT%"
+goto RUN_DONE
+:RUN_NO_AGENT
+echo [ERROR] Не найден %AGENT_BAT%
+pause
+:RUN_DONE
 echo.
 echo ---------------------------------------------------
 echo [OK] Работа завершена.
@@ -57,24 +59,24 @@ goto MENU
 
 :CHECK_OLLAMA
 cls
-if exist "%CHECK_BAT%" (
-    call "%CHECK_BAT%"
-) else (
-    echo [ERROR] Не найден %CHECK_BAT%
-    pause
-)
+if exist "%CHECK_BAT%" goto CHECK_RUN
+echo [ERROR] Не найден %CHECK_BAT%
+pause
+goto MENU
+:CHECK_RUN
+call "%CHECK_BAT%"
 goto MENU
 
 :RUN_FIREFOX
 cls
 echo [*] Запуск Firefox Portable...
-if exist "%FF_BAT%" (
-    call "%FF_BAT%"
-    echo [OK] Браузер запущен.
-) else (
-    echo [ERROR] Не найден %FF_BAT%
-    pause
-)
+if exist "%FF_BAT%" goto FF_RUN
+echo [ERROR] Не найден %FF_BAT%
+pause
+goto MENU
+:FF_RUN
+call "%FF_BAT%"
+echo [OK] Браузер запущен.
 timeout /t 2
 goto MENU
 

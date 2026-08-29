@@ -18,4 +18,4 @@ if exist "%TOOLS_DIR%\FirefoxPortable.exe" (
     echo [ERROR] firefox.exe ili FirefoxPortable.exe ne najden v Tools\FirefoxPortable\
     echo Prover'te raspolozhenie fajlov v papke Tools!
     pause
-)
+)

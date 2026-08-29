@@ -37,4 +37,4 @@ exit /b 0
 echo.
 echo [ERROR] Ne udalos' skachat' fajl! Prover'te soedinenie s Set'yu.
 pause
-exit /b 1
+exit /b 1

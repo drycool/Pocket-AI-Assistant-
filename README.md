@@ -126,6 +126,7 @@ admin-stick/
 ├── Data\config.pi.json          # шаблон: Raspberry Pi 192.168.0.10 (шлюз)
 ├── Data\config.tailscale.json   # шаблон: Tailscale 100.121.254.115
 ├── Data\config.lan.json         # шаблон: LAN 192.168.0.87
+├── scripts\check-ollama.ps1     # TCP-проверка порта Ollama (вызывается из .bat)
 ├── scripts\pi-ollama-gateway.py # шлюз для Pi (будит gpu2 по WoL + ретранслятор)
 └── scripts\install-gateway.sh   # установка шлюза на Pi как systemd-сервиса
 ```

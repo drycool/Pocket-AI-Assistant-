@@ -81,7 +81,7 @@ admin-stick/
     { "name": "DeepSeek-Paid",    "type": "openai", "base_url": "https://api.deepseek.com/v1", "api_key": "sk-ds-...", "model": "deepseek-v4-flash" },
     { "name": "OpenRouter-Paid",  "type": "openai", "base_url": "https://openrouter.ai/api/v1", "api_key": "sk-or-...", "model": "anthropic/claude-3.5-haiku" },
     { "name": "Groq",             "type": "openai", "base_url": "https://api.groq.com/openai/v1", "api_key": "gsk_...", "model": "llama-3.3-70b-versatile" },
-    { "name": "Local-Ollama",     "type": "openai", "base_url": "http://100.x.y.z:11434/v1", "api_key": "ollama", "model": "qwen2.5-coder" }
+    { "name": "Local-Ollama-gpu2", "type": "openai", "base_url": "http://100.121.254.115:11434/v1", "api_key": "ollama", "model": "qwen3:8b" }
   ]
 }
 ```
@@ -89,6 +89,28 @@ admin-stick/
 - `type`: `"gemini"` (нативный `generateContent`) или `"openai"` (стандарт `/v1/chat/completions` — DeepSeek, Groq, OpenRouter, Together AI, Ollama, vLLM, llama.cpp).
 - Если `config.json` отсутствует, агент предложит ввести ключ и создаст одиночного провайдера `Gemini-Free`.
 - Для локального Ollama достаточно передать `"api_key": "ollama"` — ключ не проверяется.
+
+### Локальный режим (Ollama на сервере gpu2)
+
+Ветка `feature/ollama-qwen3-8b-gpu2` настроена на чисто локальную работу: единственный провайдер — **Ollama на сервере `gpu2`** (Tailscale `100.121.254.115`), модель **`qwen3:8b`**. Облачные ключи не нужны, внешний интернет не требуется — нужен лишь доступ по Tailscale/LAN до `gpu2:11434`.
+
+```json
+{
+  "providers": [
+    { "name": "Local-Ollama-gpu2", "type": "openai", "base_url": "http://100.121.254.115:11434/v1", "api_key": "ollama", "model": "qwen3:8b" }
+  ]
+}
+```
+
+Проверить модель напрямую:
+
+```bash
+curl http://100.121.254.115:11434/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"qwen3:8b","messages":[{"role":"user","content":"Привет"}]}'
+```
+
+Список локальных моделей: `curl http://100.121.254.115:11434/api/tags`.
 
 ### Запуск с флешки
 

@@ -1,5 +1,13 @@
 {
+  "_note": "Для чисто локальной работы оставьте только первый провайдер (Local-Ollama-gpu2). Остальные — опциональный облачный fallback (требуются API-ключи).",
   "providers": [
+    {
+      "name": "Local-Ollama-gpu2",
+      "type": "openai",
+      "base_url": "http://100.121.254.115:11434/v1",
+      "api_key": "ollama",
+      "model": "qwen3:8b"
+    },
     {
       "name": "Gemini-Free",
       "type": "gemini",
@@ -26,13 +34,6 @@
       "base_url": "https://api.groq.com/openai/v1",
       "api_key": "gsk_...",
       "model": "llama-3.3-70b-versatile"
-    },
-    {
-      "name": "Local-Ollama",
-      "type": "openai",
-      "base_url": "http://100.x.y.z:11434/v1",
-      "api_key": "ollama",
-      "model": "qwen2.5-coder"
     }
   ]
 }

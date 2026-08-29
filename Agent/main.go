@@ -102,6 +102,12 @@ var (
 	providers   []Provider
 )
 
+// httpClient — общий HTTP-клиент с таймаутом. Важен для локальных
+// Ollama/vLLM: первая загрузка модели в VRAM занимает до нескольких минут,
+// а при недоступном сервере (Tailscale/LAN) запрос должен быстро падать,
+// чтобы сработал fallback на следующий провайдер.
+var httpClient = &http.Client{Timeout: 300 * time.Second}
+
 const SystemPrompt = "Ты — карманный AI-инженер и диагност систем Windows/Linux. " +
 	"Твоя задача — анализировать проблемы гостевого ПК, давать точные PowerShell, CMD или Bash команды " +
 	"и помогать локализовать сбои. Отвечай лаконично и по делу."
@@ -396,7 +402,7 @@ func callOpenAI(p Provider, history []Content, systemPrompt string) (string, err
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+p.APIKey)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -443,7 +449,7 @@ func callGemini(p Provider, history []Content, systemPrompt string) (string, err
 		return "", err
 	}
 
-	resp, err := http.Post(url, "application/json", bytes.NewBuffer(jsonBytes))
+	resp, err := httpClient.Post(url, "application/json", bytes.NewBuffer(jsonBytes))
 	if err != nil {
 		return "", err
 	}

@@ -6,6 +6,7 @@ setlocal
 set "USB_DRIVE=%~dp0"
 set "AGENT_BAT=%USB_DRIVE%bin\agent.bat"
 set "FF_BAT=%USB_DRIVE%bin\ff-portable.bat"
+set "CHECK_BAT=%USB_DRIVE%bin\check-ollama.bat"
 set "REPORTS_DIR=%USB_DRIVE%Data\reports"
 set "LOGS_DIR=%USB_DRIVE%Data\logs"
 
@@ -18,19 +19,28 @@ echo  [1] Запустить Go-Агент (Диагностика и Чат)
 echo  [2] Запустить Firefox Portable (Gemini Web UI)
 echo  [3] Открыть папку с Отчетами (Data/reports)
 echo  [4] Открыть папку с Логами (Data/logs)
+echo  [5] Проверить связь с Ollama gpu2 (Локальная модель)
 echo  [0] Выход
 echo ===================================================
-set /p CHOICE="Выберите действие (0-4): "
+set /p CHOICE="Выберите действие (0-5): "
 
 if "%CHOICE%"=="1" goto RUN_AGENT
 if "%CHOICE%"=="2" goto RUN_FIREFOX
 if "%CHOICE%"=="3" goto OPEN_REPORTS
 if "%CHOICE%"=="4" goto OPEN_LOGS
+if "%CHOICE%"=="5" goto CHECK_OLLAMA
 if "%CHOICE%"=="0" exit
 goto MENU
 
 :RUN_AGENT
 cls
+echo [*] Проверка доступа к локальной модели (Ollama gpu2)...
+if exist "%CHECK_BAT%" (
+    call "%CHECK_BAT%" AUTO
+) else (
+    echo [WARN] Не найден %CHECK_BAT%
+)
+echo ---------------------------------------------------
 echo [*] Запуск AI-Агента...
 echo ---------------------------------------------------
 if exist "%AGENT_BAT%" (
@@ -43,6 +53,16 @@ echo.
 echo ---------------------------------------------------
 echo [OK] Работа завершена.
 pause
+goto MENU
+
+:CHECK_OLLAMA
+cls
+if exist "%CHECK_BAT%" (
+    call "%CHECK_BAT%"
+) else (
+    echo [ERROR] Не найден %CHECK_BAT%
+    pause
+)
 goto MENU
 
 :RUN_FIREFOX

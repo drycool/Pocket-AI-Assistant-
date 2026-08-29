@@ -1,0 +1,11 @@
+{
+  "providers": [
+    {
+      "name": "Local-Ollama-gpu2-via-Pi",
+      "type": "openai",
+      "base_url": "http://192.168.0.10:11434/v1",
+      "api_key": "ollama",
+      "model": "qwen3:8b"
+    }
+  ]
+}

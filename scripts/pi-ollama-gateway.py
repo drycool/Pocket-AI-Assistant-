@@ -4,13 +4,19 @@ Ollama Gateway для Raspberry Pi (работает 24/7).
 
 Назначение: USB-флешка (агент) подключается к Pi, а Pi уже сам:
   1. проверяет доступность gpu2 (сервер с Ollama);
-  2. если gpu2 выключен/спит — будит его по Wake-on-LAN (MAC 04:d9:f5:ae:f1:76);
+  2. если gpu2 выключен/спит - будит его по Wake-on-LAN (MAC 04:d9:f5:ae:f1:76);
   3. ждёт поднятия Ollama (до WAKE_RETRIES x 5 сек);
   4. прогревает модель (загружает в VRAM), чтобы первый запрос агента был быстрым;
   5. прозрачно ретранслирует трафик на gpu2:11434.
 
-Агент на флешке при этом просто ходит на http://<IP_Pi>:11434/v1
-(все стандартные эндпоинты Ollama /v1 и /api работают).
+Безопасность:
+  - LAN (192.168.0.0/16, 10/8, 172.16/12) и Tailscale (100.64.0.0/10) -
+    доверенные сети, работают без пароля.
+  - Все остальные подключения (интернет через проброс порта) требуют
+    заголовок "Authorization: Bearer <AUTH_TOKEN>". Агент шлёт его
+    автоматически из api_key в Data/config.json.
+  - Проверка токена выполняется ДО пробуждения gpu2: внешние зонды
+    не смогут включить сервер.
 
 Переменные окружения (опционально, есть значения по умолчанию):
   GPU2_HOST   - адрес сервера с Ollama  (по умолчанию 192.168.0.87)
@@ -20,7 +26,9 @@ Ollama Gateway для Raspberry Pi (работает 24/7).
   MODEL       - модель для прогрева     (по умолчанию qwen3:8b)
   WAKE_RETRIES- сколько раз ждать по 5с (по умолчанию 60 => до 5 минут)
   PRELOAD     - прогревать модель после пробуждения (1/0, по умолчанию 1)
+  AUTH_TOKEN  - токен для внешних подключений (пусто = не требовать)
 """
+import ipaddress
 import json
 import logging
 import os
@@ -37,11 +45,59 @@ LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "11434"))
 MODEL = os.environ.get("MODEL", "qwen3:8b")
 WAKE_RETRIES = int(os.environ.get("WAKE_RETRIES", "60"))
 PRELOAD = os.environ.get("PRELOAD", "1") == "1"
+AUTH_TOKEN = os.environ.get("AUTH_TOKEN", "")
 
 LOG = logging.getLogger("ollama-gateway")
 
 # Сериализуем пробуждение+прогрев: параллельные подключения не дублируют WoL.
 WAKE_LOCK = threading.Lock()
+
+# Доверенные подсети (работают без токена): LAN + Tailscale.
+TRUSTED_NETS = [
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("100.64.0.0/10"),   # Tailscale
+    ipaddress.ip_network("127.0.0.0/8"),
+]
+
+
+def is_trusted(ip_str):
+    try:
+        ip = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return False
+    return any(ip in net for net in TRUSTED_NETS)
+
+
+def read_request_head(sock, max_bytes=16384, timeout=6.0):
+    """Читает начало HTTP-запроса клиента (до конца заголовков)."""
+    sock.settimeout(timeout)
+    buf = b""
+    while len(buf) < max_bytes:
+        try:
+            chunk = sock.recv(4096)
+        except (socket.timeout, OSError):
+            break
+        if not chunk:
+            break
+        buf += chunk
+        if b"\r\n\r\n" in buf or b"\n\n" in buf:
+            break
+    return buf
+
+
+def auth_ok(head_bytes):
+    """True, если в заголовках есть Authorization: Bearer <AUTH_TOKEN>."""
+    text = head_bytes.decode("utf-8", "ignore")
+    for line in text.splitlines():
+        if line.lower().lstrip().startswith("authorization:"):
+            value = line.split(":", 1)[1].strip()
+            parts = value.split(None, 1)
+            if len(parts) == 2 and parts[0].lower() == "bearer" and parts[1].strip() == AUTH_TOKEN:
+                return True
+            return False
+    return False
 
 
 def gpu2_up(timeout=2.0):
@@ -67,17 +123,17 @@ def wake_gpu2():
 
 
 def wait_gpu2():
-    """Пробуждение gpu2 и ожидание подъёма Ollama. True если gpu2 отвечает."""
+    """Пробуждение gpu2 и ожидание подъёма Ollama. True - если пришлось будить."""
     if gpu2_up():
-        return False  # уже работает — будить не пришлось
-    LOG.info("gpu2 (%s:%d) не отвечает — пробуждаю...", GPU2_HOST, GPU2_PORT)
+        return False
+    LOG.info("gpu2 (%s:%d) не отвечает - пробуждаю...", GPU2_HOST, GPU2_PORT)
     wake_gpu2()
     for attempt in range(1, WAKE_RETRIES + 1):
         time.sleep(5)
         if gpu2_up():
             LOG.info("gpu2 поднялся (попытка %d)", attempt)
             return True
-    LOG.error("gpu2 не поднялся за %d c — проверьте WoL/питание", WAKE_RETRIES * 5)
+    LOG.error("gpu2 не поднялся за %d c - проверьте WoL/питание", WAKE_RETRIES * 5)
     return False
 
 
@@ -117,20 +173,46 @@ class RelayHandler(socketserver.BaseRequestHandler):
     def handle(self):
         peer = self.client_address[0]
         LOG.info("Подключение от %s", peer)
+
+        # --- Авторизация внешних подключений (интернет/проброс порта) ---
+        head = b""
+        if AUTH_TOKEN and not is_trusted(peer):
+            head = read_request_head(self.request)
+            if not auth_ok(head):
+                LOG.warning("401: внешнее подключение %s без валидного токена", peer)
+                try:
+                    self.request.sendall(
+                        b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n")
+                except OSError:
+                    pass
+                self.request.close()
+                return
+            LOG.info("Авторизация внешнего подключения %s: OK", peer)
+
+        # --- Пробуждение gpu2 и прогрев модели ---
         with WAKE_LOCK:
             woken = wait_gpu2()
-            if woken is False and not gpu2_up():
-                LOG.error("gpu2 недоступен — разрыв соединения с %s", peer)
+            if not woken and not gpu2_up():
+                LOG.error("gpu2 недоступен - разрыв соединения с %s", peer)
                 self.request.close()
                 return
             if PRELOAD and woken:
                 preload_model()
+
+        # --- Прозрачная ретрансляция ---
         try:
             up = socket.create_connection((GPU2_HOST, GPU2_PORT), timeout=10)
         except OSError as e:
             LOG.error("Не удалось подключиться к gpu2: %s", e)
             self.request.close()
             return
+        if head:
+            try:
+                up.sendall(head)
+            except OSError:
+                up.close()
+                self.request.close()
+                return
         t1 = threading.Thread(target=pump, args=(self.request, up, "c->s"), daemon=True)
         t2 = threading.Thread(target=pump, args=(up, self.request, "s->c"), daemon=True)
         t1.start()
@@ -151,8 +233,9 @@ def main():
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
     )
-    LOG.info("Ollama Gateway: 0.0.0.0:%d -> %s:%d (MAC %s, модель %s, preload=%s)",
-             LISTEN_PORT, GPU2_HOST, GPU2_PORT, GPU2_MAC, MODEL, PRELOAD)
+    LOG.info("Ollama Gateway: 0.0.0.0:%d -> %s:%d (MAC %s, модель %s, preload=%s, auth=%s)",
+             LISTEN_PORT, GPU2_HOST, GPU2_PORT, GPU2_MAC, MODEL, PRELOAD,
+             "вкл" if AUTH_TOKEN else "выкл")
     with ThreadedServer(("0.0.0.0", LISTEN_PORT), RelayHandler) as srv:
         srv.serve_forever()
 

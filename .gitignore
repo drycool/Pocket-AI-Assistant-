@@ -1,5 +1,6 @@
 # Конфигурации и ключи
 Data/config.json
+Data/config.public.json
 
 # Данные сессий и дампы систем
 Data/sessions/*.json

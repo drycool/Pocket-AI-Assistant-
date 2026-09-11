@@ -79,6 +79,19 @@ set "POLRC=!ERRORLEVEL!"
 type "!POLICY!"
 if not "!POLRC!"=="0" echo [!] ВНИМАНИЕ: самопроверка политики нашла расхождения.
 echo.
+rem --- детерминированная самопроверка ПУТИ ВЫПОЛНЕНИЯ: те же шаги, что и у
+rem     настоящих команд (политика -^> подтверждение -^> запуск -^> журнал),
+rem     но подтверждения не даются (пустой stdin = отказ), поэтому реально
+rem     выполняется только чтение. Это доказательство блокировок с гостевого
+rem     ПК, независимое от того, какие команды согласится предложить модель.
+set "SELFTEST=%LOGDIR%\field-selftest-!STAMP!.txt"
+echo === [selftest] самопроверка пути выполнения (уровни L0/L2/L3) ===
+echo === [selftest] самопроверка пути выполнения (L0 -^> запрет, L2 -^> подтверждение, L3 -^> двойное подтверждение) === > "!SELFTEST!"
+"%EXE%" -level 0 -selftest >> "!SELFTEST!" 2>&1
+"%EXE%" -level 2 -selftest >> "!SELFTEST!" 2>&1
+"%EXE%" -level 3 -selftest >> "!SELFTEST!" 2>&1
+type "!SELFTEST!"
+echo.
 
 echo [*] Сводный отчёт: %REPORT%
 echo.
@@ -90,7 +103,7 @@ call :RUN "L2-yes" "2" "field-L2-fix-yes.txt" "подтверждение (y): i
 call :RUN "L2-blk" "2" "field-L2-block.txt" "format и незнакомая команда -> BLOCK"
 
 rem --- сводный отчёт + журнал действий ---
-copy /b "%LOGDIR%\field-L0-!STAMP!.txt" + "%LOGDIR%\field-L1-!STAMP!.txt" + "%LOGDIR%\field-L2-no-!STAMP!.txt" + "%LOGDIR%\field-L2-yes-!STAMP!.txt" + "%LOGDIR%\field-L2-blk-!STAMP!.txt" + "%LOGDIR%\field-policy-!STAMP!.txt" "%REPORT%" >nul 2>&1
+copy /b "%LOGDIR%\field-L0-!STAMP!.txt" + "%LOGDIR%\field-L1-!STAMP!.txt" + "%LOGDIR%\field-L2-no-!STAMP!.txt" + "%LOGDIR%\field-L2-yes-!STAMP!.txt" + "%LOGDIR%\field-L2-blk-!STAMP!.txt" + "%LOGDIR%\field-policy-!STAMP!.txt" + "%LOGDIR%\field-selftest-!STAMP!.txt" "%REPORT%" >nul 2>&1
 if exist "%LOGDIR%\actions_*.log" (
     echo. >> "%REPORT%"
     echo ===== ЖУРНАЛ ДЕЙСТВИЙ ===== >> "%REPORT%"
@@ -103,6 +116,7 @@ echo.
 echo      Сводный отчёт : %REPORT%
 echo      Стенограммы   : %LOGDIR%\field-L*-!STAMP!.txt
 echo      Политика      : %LOGDIR%\field-policy-!STAMP!.txt
+echo      Самопроверка  : %LOGDIR%\field-selftest-!STAMP!.txt
 echo      Журнал команд : %LOGDIR%\actions_*.log
 echo.
 echo      Пришлите сводный отчёт целиком.

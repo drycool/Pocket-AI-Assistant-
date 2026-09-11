@@ -39,8 +39,18 @@ var policyCases = []policyCase{
 	{"chkdsk /scan", [4]Verdict{VForbidden, VReadOnly, VReadOnly, VReadOnly}},
 	{"dism /online /cleanup-image /scanhealth", [4]Verdict{VForbidden, VReadOnly, VReadOnly, VReadOnly}},
 	{`powershell -c "Get-Service"`, [4]Verdict{VForbidden, VReadOnly, VReadOnly, VReadOnly}},
+	// Прогон 6: модель отдаёт команду уже обёрнутой в powershell со скриптом
+	// внутри. Внешняя оболочка агента раскрывала `$_` — теперь обёртка
+	// снимается и скрипт идёт через -EncodedCommand (дефект 13).
+	{`powershell -NoProfile -Command "Get-Service | Where-Object {$_.Status -eq 'Stopped'} | Select-Object Name,DisplayName | Format-Table -AutoSize"`,
+		[4]Verdict{VForbidden, VReadOnly, VReadOnly, VReadOnly}},
+	{`Get-WinEvent -FilterHashtable @{LogName='System';Level=2} -MaxEvents 10 | Select-Object TimeCreated,ProviderName,Id`,
+		[4]Verdict{VForbidden, VReadOnly, VReadOnly, VReadOnly}},
 	{"Get-CimInstance Win32_OperatingSystem | Format-List",
 		[4]Verdict{VForbidden, VReadOnly, VReadOnly, VReadOnly}},
+	// Прогон 6: это ровно та команда, которую модель предложила как «безопасную
+	// альтернативу» очистке журнала, и её корректно отсекала политика L2.
+	{"wevtutil sl System /ms:20971520", [4]Verdict{VForbidden, VNotAllowed, VNotAllowed, VNeedsYes}},
 
 	// --- безопасная починка: с L2 и только с подтверждением ---
 	{"ipconfig /flushdns", [4]Verdict{VForbidden, VNotAllowed, VNeedsYes, VNeedsYes}},

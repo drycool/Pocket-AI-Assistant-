@@ -231,30 +231,32 @@ var (
 // unwrapShell снимает обёртки `powershell -c "..."` / `pwsh -Command "..."`.
 // Возвращает внутреннюю команду и признак «непрозрачная нагрузка»
 // (-EncodedCommand / -e): её нельзя разобрать, поэтому она всегда опасна.
+//
+// Регистр флагов не важен (`-Command` и `-command`), а вот текст скрипта
+// возвращается КАК ЕСТЬ — по нему потом выполняется команда, поэтому менять
+// его нельзя (дефект 13: ломали `$_` именно на пути выполнения).
 func unwrapShell(c string) (inner string, opaque bool) {
-	if !strings.HasPrefix(c, "powershell") && !strings.HasPrefix(c, "pwsh") {
+	if !rePSWrapper.MatchString(c) {
 		return "", false
 	}
-	rest := strings.TrimSpace(c[strings.IndexByte(c, ' ')+1:])
-	// Флаги проверяем только ДО -c/-Command: внутри кавычек может встретиться
-	// что угодно (например `grep -e foo`), это не делает команду непрозрачной.
-	for _, tok := range strings.Fields(rest) {
-		lt := strings.Trim(tok, `"'`)
-		if lt == "-c" || lt == "/c" || strings.HasPrefix(lt, "-command") {
-			break
-		}
-		if lt == "-e" || lt == "-enc" || strings.HasPrefix(lt, "-encodedcommand") {
+	loc := rePSCommandFlag.FindStringIndex(c)
+	if loc == nil {
+		// Флага -c/-command нет: разобрать нечего, но -e/-enc без него
+		// всё равно непрозрачен (`powershell -EncodedCommand SQBFAFgA`).
+		if rePSOpaqueFlag.MatchString(c) {
 			return "", true
 		}
+		return "", false
 	}
-	for _, flag := range []string{"-c ", "-command ", "/c "} {
-		if i := strings.Index(rest, flag); i >= 0 {
-			in := strings.TrimSpace(rest[i+len(flag):])
-			in = strings.Trim(in, `"'`)
-			return in, false
-		}
+	// Непрозрачность проверяем только ДО -c/-Command: внутри кавычек может
+	// встретиться что угодно (например `grep -e foo`), это не делает
+	// команду непрозрачной.
+	if rePSOpaqueFlag.MatchString(c[:loc[0]]) {
+		return "", true
 	}
-	return "", false
+	in := strings.TrimSpace(c[loc[1]:])
+	in = strings.Trim(in, `"'`)
+	return in, false
 }
 
 // classify — центральная точка политики: что делать с командой на уровне level.
@@ -736,7 +738,13 @@ func runCommand(cmd string, timeout time.Duration) (string, int, error) {
 	var tmpFile string
 	if runtime.GOOS == "windows" {
 		if isPowerShellCommand(cmd) {
-			c = exec.CommandContext(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command", cmd)
+			// Скрипт передаём через -EncodedCommand (Base64/UTF-16LE): внешняя
+			// оболочка не раскроет `$переменные` и не съест кавычки. Обёртку
+			// вида `powershell -Command "..."`, которую добавляет сама модель,
+			// снимаем — иначе получается вторая оболочка (дефект 13).
+			script, _ := execScript(cmd)
+			c = exec.CommandContext(ctx, "powershell", "-NoProfile", "-NonInteractive",
+				"-EncodedCommand", encodePowerShellScript(script))
 		} else {
 			// Нативные утилиты (systeminfo, ipconfig, wmic, sc, netsh, findstr)
 			// запускаем через cmd.exe, переключая кодовую страницу консоли:
@@ -1202,6 +1210,14 @@ func handleCommand(reader *bufio.Reader, cfg Config, cmd string) cmdResult {
 			logAction(currentLevel, cmd, verdict, false, -1, "")
 			return cmdResult{note: "оператор отказался"}
 		}
+	}
+
+	// Прозрачность: если текст команды отличается от того, что предложила модель
+	// (снята её собственная обёртка `powershell -Command "..."`), показываем это
+	// явно. Такой обёртке верить нельзя: именно из-за неё в прогоне 6 внешняя
+	// оболочка раскрыла `$_` и команда упала (дефект 13).
+	if script, unwrapped := execScript(cmd); unwrapped {
+		fmt.Printf("      [i] обёртка powershell снята, выполняется: %s\n", truncate(script, 300))
 	}
 
 	start := time.Now()

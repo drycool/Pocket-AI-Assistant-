@@ -13,6 +13,7 @@ package main
 // stdlib-only: таблицы ниже, никаких golang.org/x/text.
 
 import (
+	"encoding/base64"
 	"fmt"
 	"os/exec"
 	"regexp"
@@ -20,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"unicode/utf16"
 	"unicode/utf8"
 )
 
@@ -195,6 +197,55 @@ func decodeConsoleBytes(b []byte) string {
 		// идентичен, а для русского — единственный осмысленный вариант.
 		return rescueMojibake(b, decodeTable(b, cp866Runes))
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Передача скрипта PowerShell: одна оболочка вместо двух
+// ---------------------------------------------------------------------------
+
+// encodePowerShellScript кодирует скрипт в Base64 (UTF-16LE) для -EncodedCommand.
+//
+// Зачем (дефект 13, полевой прогон 6): модель отдавала готовую строку
+// `powershell -NoProfile -Command "Get-Service | Where-Object {$_.Status -eq 'Stopped'}"`,
+// а агент оборачивал ЕЁ в свою команду `powershell -Command <строка>`. Внешний
+// PowerShell раскрывал `$_` в своём контексте (там это $null) — внутренний
+// получал `.Status` и падал с «The term '.Status' is not recognized». Команда,
+// которая в обычной консоли работает, у агента ломалась, и модель уходила в
+// ложный диагноз («символ съелся оболочкой cmd, надо экранировать $»).
+//
+// -EncodedCommand снимает проблему целиком: скрипт передаётся в Base64, ни одна
+// оболочка не раскрывает $переменные, %переменные% и не ест кавычки.
+func encodePowerShellScript(script string) string {
+	runes := utf16.Encode([]rune(script))
+	buf := make([]byte, 0, len(runes)*2)
+	for _, r := range runes {
+		buf = append(buf, byte(r), byte(r>>8)) // UTF-16LE — порядок байт, ожидаемый powershell.exe
+	}
+	return base64.StdEncoding.EncodeToString(buf)
+}
+
+// rePSWrapper — вызов PowerShell/pwsh (с .exe и без, любой регистр).
+var rePSWrapper = regexp.MustCompile(`(?is)^\s*(?:powershell|pwsh)(?:\.exe)?\b`)
+
+// rePSCommandFlag — флаг -c/-command и всё, что за ним (без учёта регистра).
+// Ленивый `.*?` берёт ПЕРВОЕ вхождение: наш флаг стоит до тела скрипта.
+var rePSCommandFlag = regexp.MustCompile(`(?is)^.*?-(?:c|command)\s+`)
+
+// rePSOpaqueFlag — -e/-enc/-encodedcommand: нагрузку разобрать нельзя.
+var rePSOpaqueFlag = regexp.MustCompile(`(?is)^.*?-(?:e|enc|encodedcommand)\b`)
+
+// execScript решает, какой текст реально пойдёт на выполнение.
+//
+// Если модель сама обернула команду в `powershell ... -Command "..."`, обёртка
+// снимается: двумя оболочками текст скрипта проходит через лишний разбор
+// (см. encodePowerShellScript). Второй возвращаемый признак — «обёртка снята»,
+// он нужен для прозрачности: оператор должен видеть, что именно запускается.
+func execScript(cmd string) (script string, unwrapped bool) {
+	inner, opaque := unwrapShell(cmd)
+	if inner == "" || opaque || inner == strings.TrimSpace(cmd) {
+		return cmd, false
+	}
+	return inner, true
 }
 
 // ---------------------------------------------------------------------------

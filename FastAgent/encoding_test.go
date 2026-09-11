@@ -3,7 +3,10 @@ package main
 // Тесты декодирования вывода Windows-команд. Регрессия из полевого теста на
 // LENOVO: русский текст из wmic/systeminfo/ipconfig приходил как "��������".
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestEncodingTables(t *testing.T) {
 	if len(cp866Runes) != 128 {
@@ -84,8 +87,65 @@ func TestDecodeConsoleBytesModes(t *testing.T) {
 	}
 }
 
-// --- вспомогательные кодировщики для тестов (обратные таблицам) ---
+func TestIsPowerShellCommand(t *testing.T) {
+	ps := []string{
+		`Get-Service | Where-Object Status -eq 'Stopped'`,
+		`Get-WinEvent -FilterHashtable @{LogName='System'; Level=2} -MaxEvents 10`,
+		`Stop-Service Spooler`,
+		`Get-NetIPConfiguration | Format-Table InterfaceAlias, IPv4Address`,
+		`Restart-Service -Name Spooler`,
+	}
+	native := []string{
+		`systeminfo | findstr /B /C:"OS Name" /C:"OS Version"`,
+		`ipconfig /all`,
+		`ipconfig /flushdns`,
+		`wmic os get Caption,Version,OSArchitecture /value`,
+		`sc query type= service state= inactive`,
+		`netsh winsock reset`,
+		`ver`,
+		`dir C:\Windows`,
+		`findstr /i error C:\logs\app.log`,
+		`schema: systeminfo`,
+	}
+	for _, c := range ps {
+		if !isPowerShellCommand(c) {
+			t.Errorf("ожидался PowerShell, но выбран cmd.exe: %q", c)
+		}
+	}
+	for _, c := range native {
+		if isPowerShellCommand(c) {
+			t.Errorf("ожидался cmd.exe, но выбран PowerShell: %q", c)
+		}
+	}
+}
 
+func TestBuildCmdFile(t *testing.T) {
+	script := buildCmdFile(`systeminfo | findstr /C:"OS Name"`, 866, 65001)
+	if !strings.HasPrefix(script, "@echo off\r\nchcp 866 >nul\r\n") {
+		t.Errorf("нет переключения в OEM-кодировку в начале: %q", script)
+	}
+	if strings.Count(script, "chcp 866 >nul") != 1 || strings.Count(script, "chcp 65001 >nul") != 1 {
+		t.Errorf("ожидалось ровно одно переключение туда и обратно: %q", script)
+	}
+	// Код возврата надо снять ДО возврата кодировки, иначе вернём код chcp.
+	iRC := strings.Index(script, "FASTAGENT_RC=%ERRORLEVEL%")
+	iRestore := strings.Index(script, "chcp 65001")
+	if iRC == -1 || iRestore == -1 || iRC > iRestore {
+		t.Errorf("ERRORLEVEL должен сниматься до смены кодировки: %q", script)
+	}
+	if !strings.Contains(script, `systeminfo | findstr /C:"OS Name"`) {
+		t.Errorf("команда потерялась: %q", script)
+	}
+	if !strings.HasSuffix(script, "exit /b %FASTAGENT_RC%\r\n") {
+		t.Errorf("ожидался exit с исходным кодом: %q", script)
+	}
+	// Все строки — CRLF (cmd иначе может сломаться на многострочном файле).
+	if lf := strings.Count(script, "\n") - strings.Count(script, "\r\n"); lf != 0 {
+		t.Errorf("одиночных LF: %d", lf)
+	}
+}
+
+// --- вспомогательные кодировщики для тестов (обратные таблицам) ---
 func encodeWith(text string, table []rune) []byte {
 	rev := make(map[rune]byte, 128)
 	for i, r := range table {

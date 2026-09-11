@@ -13,7 +13,9 @@ package main
 // stdlib-only: таблицы ниже, никаких golang.org/x/text.
 
 import (
+	"fmt"
 	"os/exec"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -122,4 +124,43 @@ func decodeConsoleBytes(b []byte) string {
 		// идентичен, а для русского — единственный осмысленный вариант.
 		return decodeTable(b, cp866Runes)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Запуск команд: выбор оболочки и кодовая страница консоли
+// ---------------------------------------------------------------------------
+
+// rePSTokens — признаки синтаксиса PowerShell (cmdlet'ы вида Get-*, $переменные,
+// хэш-таблицы @{...}, скобочные блоки).
+var rePSTokens = regexp.MustCompile(`(?i)(^|[\s|;(])(get|set|test|select|where|sort|format|measure|new|remove|start|stop|restart|clear|resolve|compare|out|add|import|export|convertto|convertfrom|invoke|enable|disable|update|install|uninstall|join|split|group|foreach|write|read|copy|move|rename|add|enter|exit|push|pop)-[a-z]|\$|@\{|\{[^}]*\}`)
+
+// isPowerShellCommand определяет, нужно ли запускать команду через PowerShell.
+// Нативные утилиты (systeminfo, ipconfig, wmic, sc, netsh) идут через cmd.exe:
+// там мы управляем кодовой страницей консоли (см. buildCmdFile).
+func isPowerShellCommand(cmd string) bool {
+	return rePSTokens.MatchString(cmd)
+}
+
+// buildCmdFile формирует тело временного .cmd для нативной команды.
+// Зачем: консоль в UTF-8 (chcp 65001) ломает вывод нативных утилит — findstr и
+// подобные читают OEM-байты (cp866) как UTF-8 и заменяют кириллицу на '?'.
+// Поэтому на время команды переключаем консоль в OEM-кодировку и возвращаем
+// UTF-8 обратно, чтобы наш собственный вывод оставался читаемым.
+func buildCmdFile(cmd string, oemCP, restoreCP int) string {
+	return "@echo off\r\n" +
+		fmt.Sprintf("chcp %d >nul\r\n", oemCP) +
+		cmd + "\r\n" +
+		"set \"FASTAGENT_RC=%ERRORLEVEL%\"\r\n" +
+		fmt.Sprintf("chcp %d >nul\r\n", restoreCP) +
+		"exit /b %FASTAGENT_RC%\r\n"
+}
+
+// ensureUTF8Console переключает консоль в UTF-8 (или OEM-совместимый режим, если
+// так задано в конфиге) — иначе наш русский интерфейс показывается как «кракозябры»
+// при запуске exe двойным щелчком без START.bat.
+func ensureUTF8Console() {
+	if runtime.GOOS != "windows" || encMode == "cp866" || encMode == "cp1251" {
+		return
+	}
+	_ = exec.Command("cmd", "/c", "chcp 65001 >nul").Run()
 }

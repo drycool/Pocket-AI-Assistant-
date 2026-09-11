@@ -672,10 +672,31 @@ func runCommand(cmd string, timeout time.Duration) (string, int, error) {
 	defer cancel()
 
 	var c *exec.Cmd
+	var tmpFile string
 	if runtime.GOOS == "windows" {
-		c = exec.CommandContext(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command", cmd)
+		if isPowerShellCommand(cmd) {
+			c = exec.CommandContext(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command", cmd)
+		} else {
+			// Нативные утилиты (systeminfo, ipconfig, wmic, sc, netsh, findstr)
+			// запускаем через cmd.exe, переключая кодовую страницу консоли:
+			// под chcp 65001 они теряют кириллицу, подменяя её на '?'.
+			f, err := os.CreateTemp("", "fastagent-*.cmd")
+			if err != nil {
+				return "", -1, err
+			}
+			tmpFile = f.Name()
+			if _, err := f.WriteString(buildCmdFile(cmd, detectedConsoleCP(), 65001)); err != nil {
+				f.Close()
+				return "", -1, err
+			}
+			f.Close()
+			c = exec.CommandContext(ctx, "cmd", "/c", tmpFile)
+		}
 	} else {
 		c = exec.CommandContext(ctx, "/bin/sh", "-c", cmd)
+	}
+	if tmpFile != "" {
+		defer os.Remove(tmpFile)
 	}
 	c.Env = append(os.Environ(), "PYTHONIOENCODING=utf-8")
 	out, err := c.CombinedOutput()
@@ -765,6 +786,7 @@ func main() {
 	}
 	cfg = loadConfig()
 	setEncodingMode(cfg.WindowsEncoding)
+	ensureUTF8Console()
 	if *levelFlag >= 0 && *levelFlag <= 3 {
 		cfg.AccessLevel = *levelFlag
 	}

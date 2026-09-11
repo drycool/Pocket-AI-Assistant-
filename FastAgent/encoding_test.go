@@ -166,3 +166,75 @@ func encodeWith(text string, table []rune) []byte {
 
 func encodeCP866(text string) []byte  { return encodeWith(text, cp866Runes) }
 func encodeCP1251(text string) []byte { return encodeWith(text, cp1251Runes) }
+
+// --- Спасение чужой кодировки (найдено в четвёртом полевом прогоне) ----------
+//
+// wevtutil /f:text печатает в cp1251 (ANSI) даже когда консоль в cp866, поэтому
+// в отчёте прогона 4 (LENOVO) было "Level: ╧ЁхфєяЁхцфхэшх" вместо
+// «Level: Предупреждение». Образцы ниже — реальный фрагмент того отчёта.
+
+func TestRescueMojibakeFromRealReport(t *testing.T) {
+	plain := "Level: Предупреждение\n  Opcode: Сведения\n  Keyword: Классический\n"
+	raw := encodeCP1251(plain) // байты, которые реально пришли от wevtutil
+
+	mojib := decodeTable(raw, cp866Runes)
+	if !strings.Contains(mojib, "╧ЁхфєяЁхцфхэшх") || !strings.Contains(mojib, "╩ырёёшўхёъшщ") {
+		t.Fatalf("не воспроизвели мусор из отчёта: %q", mojib)
+	}
+	if got := rescueMojibake(raw, mojib); got != plain {
+		t.Fatalf("мохнатый вывод не спасён:\n  получено  %q\n  ожидалось %q", got, plain)
+	}
+}
+
+// Полный путь декодера в режиме auto: cp1251-байты должны стать читаемым текстом.
+func TestDecodeConsoleBytesAutoRescuesCP1251(t *testing.T) {
+	defer setEncodingMode("auto")
+	setEncodingMode("auto")
+	plain := "Level: Предупреждение"
+	if got := decodeConsoleBytes(encodeCP1251(plain)); got != plain {
+		t.Fatalf("auto не распознал cp1251: %q", got)
+	}
+}
+
+// Честный cp866 (sc, ipconfig, systeminfo) и ASCII не должны переключаться.
+func TestRescueKeepsGenuineCP866AndASCII(t *testing.T) {
+	for _, plain := range []string{
+		"Служба маршрутизатора AllJoyn",
+		"Кэш сопоставителя DNS успешно очищен.",
+		"SERVICE_NAME: AJRouter",
+		"Type: 20  WIN32_SHARE_PROCESS  STATE: 1  STOPPED",
+	} {
+		raw := encodeCP866(plain)
+		if got := decodeConsoleBytes(raw); got != plain {
+			t.Fatalf("cp866-вывод испорчен: %q -> %q", plain, got)
+		}
+	}
+}
+
+// Оценка «мохнатости»: чужой текст считается по псевдографике внутри слов и по
+// редким знакам; обычный русский текст и легитимная псевдографика (tree) — нет.
+func TestMojibakeScore(t *testing.T) {
+	if bad, cyr := mojibakeScore("Предупреждение"); bad != 0 || cyr != 14 {
+		t.Fatalf("чистый текст: bad=%d cyr=%d", bad, cyr)
+	}
+	if bad, _ := mojibakeScore("╧ЁхфєяЁхцфхэшх"); bad == 0 {
+		t.Fatal("мусор не распознан как подозрительный")
+	}
+	if bad, cyr := mojibakeScore("Level: 0x800f081f"); bad != 0 || cyr != 0 {
+		t.Fatalf("ASCII не должен считаться мусором: bad=%d cyr=%d", bad, cyr)
+	}
+	// Псевдографика как таковая — не признак: ею рисует деревья `tree`.
+	if bad, _ := mojibakeScore("├─── System32\n│   └── drivers\n└─── Users"); bad != 0 {
+		t.Fatalf("легитимная псевдографика принята за мусор: bad=%d", bad)
+	}
+}
+
+// Честный cp866-вывод с деревом каталогов не должен переключаться на cp1251.
+func TestRescueKeepsGenuineTreeArt(t *testing.T) {
+	tree := "│  ├─── Документы\n│  │   ├─── Отчеты\n│  └─── System32\n├─── Program Files\n└─── Users"
+	raw := encodeCP866(tree)
+	primary := decodeTable(raw, cp866Runes)
+	if got := rescueMojibake(raw, primary); got != tree {
+		t.Fatalf("дерево каталогов испорчено:\n  получено  %q\n  ожидалось %q", got, tree)
+	}
+}

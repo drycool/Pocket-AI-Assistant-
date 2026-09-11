@@ -95,6 +95,77 @@ func decodeTable(b []byte, high []rune) string {
 	return sb.String()
 }
 
+// ---------------------------------------------------------------------------
+// Спасение «мохнатого» вывода: не всякая утилита пишет в OEM-кодировке.
+// wevtutil /f:text печатает в ANSI (cp1251) даже под chcp 866 — в отчёте это
+// выглядело как `Level: ╧ЁхфєяЁхцфхэшх` вместо «Предупреждение» (найдено в
+// четвёртом полевом прогоне). Поэтому в режиме auto декодируем те же байты и
+// второй таблицей, выбирая вариант с меньшим числом «подозрительных» символов
+// (псевдографика и редкие знаки, которые появляются только при чтении
+// кириллицы не той однобайтной таблицей). При равенстве остаётся вариант
+// кодовой страницы консоли, поэтому ASCII и честный cp866 не меняются.
+// ---------------------------------------------------------------------------
+
+// rareRunes — знаки, которые встречаются только при чтении кириллицы не той
+// однобайтной таблицей (в обычном русском тексте их нет). «Ё»/«ё» здесь НЕТ:
+// это нормальные русские буквы.
+var rareRunes = func() map[rune]bool {
+	m := make(map[rune]bool)
+	for _, r := range "ЂЃЄЅІЇЈЉЊЋЌЎЏҐґўѕїјљњћќє∙√№■░▒▓" {
+		m[r] = true
+	}
+	return m
+}()
+
+func isCyrRune(r rune) bool { return (r >= 'А' && r <= 'я') || r == 'Ё' || r == 'ё' }
+
+// mojibakeScore считает (подозрительные символы, кириллические буквы).
+// Псевдографика сама по себе легитимна — ею рисует деревья `tree` и рамки
+// таблиц, поэтому подозрительной считается только псевдографика ВНУТРИ
+// кириллического слова: в чужой однобайтовой кодировке байты русских букв
+// попадают именно в блок 0x2500-0x257F (cp866 рисует так байты cp1251).
+func mojibakeScore(s string) (bad, cyr int) {
+	rs := []rune(s)
+	for i, r := range rs {
+		switch {
+		case r >= 0x2500 && r <= 0x257F:
+			var left, right rune
+			if i > 0 {
+				left = rs[i-1]
+			}
+			if i+1 < len(rs) {
+				right = rs[i+1]
+			}
+			if isCyrRune(left) || isCyrRune(right) {
+				bad++
+			}
+		case rareRunes[r]:
+			bad++
+		case isCyrRune(r):
+			cyr++
+		}
+	}
+	return bad, cyr
+}
+
+// rescueMojibake выбирает лучшую декодировку одних и тех же байт: первой идёт
+// primary, поэтому при равенстве оценки остаётся именно она.
+func rescueMojibake(b []byte, primary string) string {
+	best := primary
+	bestBad, bestCyr := mojibakeScore(primary)
+	if bestBad == 0 {
+		return best // чисто: спасать нечего (обычный случай)
+	}
+	for _, high := range [][]rune{cp1251Runes, cp866Runes} {
+		cand := decodeTable(b, high)
+		bad, cyr := mojibakeScore(cand)
+		if bad < bestBad || (bad == bestBad && cyr > bestCyr) {
+			best, bestBad, bestCyr = cand, bad, cyr
+		}
+	}
+	return best
+}
+
 // decodeConsoleBytes — единая точка: байты вывода команды -> UTF-8 для консоли,
 // отчёта и для модели.
 func decodeConsoleBytes(b []byte) string {
@@ -112,17 +183,17 @@ func decodeConsoleBytes(b []byte) string {
 		return decodeTable(b, cp1251Runes)
 	}
 	// auto: корректный UTF-8 (Linux, современные утилиты) — как есть,
-	// иначе — по кодовой странице консоли.
+	// иначе — по кодовой странице консоли, с попыткой спасти чужую кодировку.
 	if utf8.Valid(b) {
 		return string(b)
 	}
 	switch detectedConsoleCP() {
 	case 1251:
-		return decodeTable(b, cp1251Runes)
+		return rescueMojibake(b, decodeTable(b, cp1251Runes))
 	default:
 		// 866 и прочие (437/850 без кириллицы): для ASCII-вывода результат
 		// идентичен, а для русского — единственный осмысленный вариант.
-		return decodeTable(b, cp866Runes)
+		return rescueMojibake(b, decodeTable(b, cp866Runes))
 	}
 }
 

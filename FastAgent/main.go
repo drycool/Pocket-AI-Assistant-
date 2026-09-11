@@ -152,7 +152,13 @@ var (
 		regexp.MustCompile(`^route\s+print`), regexp.MustCompile(`^ip\s+(-[a-z0-9]+\s+)*(a|addr|address|r|route|link|l|neigh|rule|maddr)`),
 		regexp.MustCompile(`^fsutil\s+(fsinfo|dirty|volume)`), regexp.MustCompile(`^chkdsk\s*$`),
 		regexp.MustCompile(`^chkdsk\s+[a-z]:\s*/scan`), // онлайн-сканирование без изменений
-		regexp.MustCompile(`^sfc\s+/verifyonly`), regexp.MustCompile(`^dism\s+/online\s+/cleanup-image\s+/scanhealth`),
+		// `chkdsk /scan` без буквы диска — тоже только чтение (пробел в политике
+		// нашла самопроверка политики `-policycheck`): раньше такая команда
+		// проваливалась в «незнакомые» и блокировалась на L1/L2.
+		regexp.MustCompile(`^chkdsk\s+/scan`),
+		regexp.MustCompile(`^sfc\s+/verifyonly`),
+		regexp.MustCompile(`^dism\s+/online\s+/cleanup-image\s+/scanhealth`),
+		regexp.MustCompile(`^dism\s+/online\s+/cleanup-image\s+/checkhealth`),
 		regexp.MustCompile(`^netsh\s+(wlan\s+show|interface\s+show|advfirewall\s+show|firewall\s+show|int\s+ip\s+show)`),
 		regexp.MustCompile(`^sc\s+query`), regexp.MustCompile(`^schtasks\s+/query`),
 		regexp.MustCompile(`^reg\s+query`), regexp.MustCompile(`^wmic\s`),
@@ -315,8 +321,15 @@ func classifyDepth(cmd string, level, depth int) Verdict {
 		}
 	}
 	// Незнакомая команда: на L3 — с подтверждением, ниже — нельзя.
+	// На L0 запрет должен быть однозначным (VForbidden): иначе сообщение
+	// «нет в белом списке, разрешить может только L3» сбивает с толку, хотя на L0
+	// не выполняется вообще ничего. Расхождение нашла самопроверка `-policycheck`
+	// (до неё случай «незнакомая команда на L0» в тестах не покрывался).
 	if level >= L3Admin {
 		return VNeedsYes
+	}
+	if level <= L0Chat {
+		return VForbidden
 	}
 	return VNotAllowed
 }
@@ -825,9 +838,19 @@ func main() {
 	levelFlag := flag.Int("level", -1, "уровень доступа 0..3 (переопределяет config)")
 	cfgFlag := flag.String("config", "", "путь к config.fast.json")
 	diagFlag := flag.Bool("diag", false, "сразу собрать диагностику гостевого ПК (нужен L1+)")
+	policyFlag := flag.Bool("policycheck", false,
+		"самопроверка политики доступа: вердикты по уровням для набора команд (команды НЕ выполняются)")
+	selfTestFlag := flag.Bool("selftest", false,
+		"самопроверка пути выполнения: попытки команд через политику+подтверждение (выполняется только чтение)")
 	flag.Parse()
 
 	initPaths()
+	if *policyFlag {
+		// Детерминированная проверка политики прямо на гостевом ПК: не зависит
+		// от того, какие команды предложит модель (см. policycheck.go).
+		ensureUTF8Console()
+		os.Exit(runPolicyCheck())
+	}
 	if *cfgFlag != "" {
 		configFile = *cfgFlag
 		actionsLog = filepath.Join(logsDir, "actions_"+time.Now().Format("2006-01-02")+".log")
@@ -881,6 +904,11 @@ func main() {
 			logAction(currentLevel, "probe-privileges", VReadOnly, true, 0,
 				fmt.Sprintf("elevated=%v", elevated))
 		}
+	}
+	if *selfTestFlag {
+		// Проверка пути выполнения прямо на этом ПК: реально выполняется только
+		// чтение, остальное блокируется и попадает в журнал (см. selftest.go).
+		os.Exit(runSelfTest(currentLevel, cfg))
 	}
 	fmt.Println("Команды: /level N — сменить уровень | /diag — собрать диагностику | /report — отчёт |")
 	fmt.Println("         /follow on|off — авто-продолжение | /clear — очистить контекст | exit — выход")

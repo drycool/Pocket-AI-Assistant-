@@ -89,6 +89,15 @@ func TestClassify(t *testing.T) {
 		{"mycustomtool --scan", L1Read, VNotAllowed},
 		{"mycustomtool --scan", L2Fix, VNotAllowed},
 		{"mycustomtool --scan", L3Admin, VNeedsYes},
+		// На L0 запрет однозначный — иначе сообщение советовало бы L3, хотя на L0
+		// не выполняется ничего (расхождение нашла самопроверка `-policycheck`).
+		{"mycustomtool --scan", L0Chat, VForbidden},
+		{"wevtutil cl System", L0Chat, VForbidden},
+		{"ipconfig /flushdns", L0Chat, VForbidden},
+		// Чтение без буквы диска и без изменений (добавлено после самопроверки)
+		{"chkdsk /scan", L1Read, VReadOnly},
+		{"dism /online /cleanup-image /checkhealth", L1Read, VReadOnly},
+		{"chkdsk /f", L1Read, VNotAllowed},
 
 		// Опасное: только L3 и с двойным подтверждением.
 		{"format C: /fs:ntfs", L2Fix, VForbidden},

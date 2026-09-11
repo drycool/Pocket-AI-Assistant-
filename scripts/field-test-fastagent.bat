@@ -69,6 +69,17 @@ for %%F in ("%LOGDIR%\actions_*.log") do (
     if exist "%%~fF" move /y "%%~fF" "%LOGDIR%\prev_!STAMP!_%%~nF.log" >nul 2>&1
 )
 
+rem --- детерминированная самопроверка политики: НЕ зависит от того, какие
+rem     команды предложит модель (она сама отказывается предлагать деструктив,
+rem     поэтому блокировки иначе не проверяются) ---
+set "POLICY=%LOGDIR%\field-policy-!STAMP!.txt"
+echo === [policy] самопроверка политики доступа (команды НЕ выполняются) ===
+"%EXE%" -policycheck > "!POLICY!" 2>&1
+set "POLRC=!ERRORLEVEL!"
+type "!POLICY!"
+if not "!POLRC!"=="0" echo [!] ВНИМАНИЕ: самопроверка политики нашла расхождения.
+echo.
+
 echo [*] Сводный отчёт: %REPORT%
 echo.
 
@@ -79,7 +90,7 @@ call :RUN "L2-yes" "2" "field-L2-fix-yes.txt" "подтверждение (y): i
 call :RUN "L2-blk" "2" "field-L2-block.txt" "format и незнакомая команда -> BLOCK"
 
 rem --- сводный отчёт + журнал действий ---
-copy /b "%LOGDIR%\field-L0-!STAMP!.txt" + "%LOGDIR%\field-L1-!STAMP!.txt" + "%LOGDIR%\field-L2-no-!STAMP!.txt" + "%LOGDIR%\field-L2-yes-!STAMP!.txt" + "%LOGDIR%\field-L2-blk-!STAMP!.txt" "%REPORT%" >nul 2>&1
+copy /b "%LOGDIR%\field-L0-!STAMP!.txt" + "%LOGDIR%\field-L1-!STAMP!.txt" + "%LOGDIR%\field-L2-no-!STAMP!.txt" + "%LOGDIR%\field-L2-yes-!STAMP!.txt" + "%LOGDIR%\field-L2-blk-!STAMP!.txt" + "%LOGDIR%\field-policy-!STAMP!.txt" "%REPORT%" >nul 2>&1
 if exist "%LOGDIR%\actions_*.log" (
     echo. >> "%REPORT%"
     echo ===== ЖУРНАЛ ДЕЙСТВИЙ ===== >> "%REPORT%"
@@ -91,6 +102,7 @@ echo [OK] Тест завершён.
 echo.
 echo      Сводный отчёт : %REPORT%
 echo      Стенограммы   : %LOGDIR%\field-L*-!STAMP!.txt
+echo      Политика      : %LOGDIR%\field-policy-!STAMP!.txt
 echo      Журнал команд : %LOGDIR%\actions_*.log
 echo.
 echo      Пришлите сводный отчёт целиком.

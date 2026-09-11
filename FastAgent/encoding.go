@@ -180,6 +180,14 @@ func decodeConsoleBytes(b []byte) string {
 		return string(b)
 	case "utf8":
 		return string(b)
+	}
+	// UTF-16 проверяем ДО всего остального: у него структурный признак (нулевые
+	// старшие байты), а ASCII-часть такого текста выглядит как валидный UTF-8 и
+	// иначе прошла бы дальше как «нормальный» вывод — с NUL-байтами внутри.
+	if s, ok := decodeUTF16(b); ok {
+		return s
+	}
+	switch encMode {
 	case "cp866":
 		return decodeTable(b, cp866Runes)
 	case "cp1251":
@@ -198,6 +206,96 @@ func decodeConsoleBytes(b []byte) string {
 		// идентичен, а для русского — единственный осмысленный вариант.
 		return rescueMojibake(b, decodeTable(b, cp866Runes))
 	}
+}
+
+// ---------------------------------------------------------------------------
+// UTF-16 в выводе нативных утилит Windows
+// ---------------------------------------------------------------------------
+
+// Проблема (дефект 17, полевой прогон 8). `sfc /scannow` — Unicode-приложение:
+// при перенаправлении вывода в pipe он пишет UTF-16LE, а не OEM-байты. Агент
+// декодировал его однобайтовой таблицей cp866, и в отчёт попало вот это:
+//
+//	\x00 \x1d\x04 0\x04 G\x04 0\x04 B\x04 >\x04 ...   (= «Начато сканирование системы…»)
+//
+// То есть 4 минуты работы sfc дали нечитаемую мешанину, и модель справедливо
+// написала, что итога проверки в выводе нет. DISM при этом пишет обычный OEM —
+// поэтому он читался нормально, и проблема была незаметна ровно до этой команды.
+//
+// Признак UTF-16 структурный: у ASCII-символов старший байт нулевой, то есть
+// нули стоят строго через один (у LE — на нечётных позициях, у BE — на чётных).
+// Этого достаточно, чтобы отличить UTF-16 от однобайтовых кодировок.
+func decodeUTF16(b []byte) (string, bool) {
+	if len(b) < 8 {
+		return "", false
+	}
+	switch {
+	case b[0] == 0xFF && b[1] == 0xFE:
+		if s, ok := utf16ToString(b[2:], true); ok {
+			return s, true
+		}
+	case b[0] == 0xFE && b[1] == 0xFF:
+		if s, ok := utf16ToString(b[2:], false); ok {
+			return s, true
+		}
+	}
+	// Без BOM: считаем нулевые байты по чётным и нечётным позициям.
+	pairs := len(b) / 2
+	if pairs == 0 {
+		return "", false
+	}
+	zerosEven, zerosOdd := 0, 0
+	for i := 0; i+1 < len(b); i += 2 {
+		if b[i] == 0 {
+			zerosEven++
+		}
+		if b[i+1] == 0 {
+			zerosOdd++
+		}
+	}
+	// Нули строго на одной стороне — иначе это не UTF-16 (cp866-текст нулей не
+	// содержит вовсе, а бинарный дамп даёт их с обеих сторон). Порог низкий:
+	// в выводе может быть много кириллицы, где старший байт не нулевой, но сам
+	// факт «нули только с одной стороны» — уже однозначный признак.
+	const minZeros = 4
+	switch {
+	case zerosOdd >= minZeros && zerosEven == 0:
+		return utf16ToString(b, true)
+	case zerosEven >= minZeros && zerosOdd == 0:
+		return utf16ToString(b, false)
+	}
+	return "", false
+}
+
+// utf16ToString декодирует пары байт (LE/BE) и проверяет результат на
+// осмысленность: если «текст» состоит из управляющих символов и U+FFFD, то это
+// не UTF-16, и решение нужно отдать обычному пути (cp866/cp1251).
+func utf16ToString(b []byte, little bool) (string, bool) {
+	if len(b) < 2 {
+		return "", false
+	}
+	u16 := make([]uint16, 0, len(b)/2)
+	for i := 0; i+1 < len(b); i += 2 {
+		if little {
+			u16 = append(u16, uint16(b[i])|uint16(b[i+1])<<8)
+		} else {
+			u16 = append(u16, uint16(b[i])<<8|uint16(b[i+1]))
+		}
+	}
+	s := string(utf16.Decode(u16))
+	runes, bad := 0, 0
+	for _, r := range s {
+		runes++
+		switch {
+		case r == '\t' || r == '\n' || r == '\r' || r == 0:
+		case r < 0x20, r == 0x7F, r == utf8.RuneError, r >= 0xE000 && r <= 0xF8FF:
+			bad++
+		}
+	}
+	if runes == 0 || bad*10 > runes { // больше 10% мусора — не текст
+		return "", false
+	}
+	return s, true
 }
 
 // ---------------------------------------------------------------------------
@@ -264,12 +362,58 @@ func decodeCLIXMLText(s string) string {
 	return strings.TrimRight(s, "\r\n\t ")
 }
 
+// normalizeOutput приводит разделители строк к LF и убирает NUL-байты.
+// Нужно потому, что фрагменты одного и того же вывода приходят с разными
+// разделителями (sfc разделяет строки прогресса одиночным CR, cmd — CRLF), а
+// после декодирования UTF-16 в тексте могут остаться нули.
+func normalizeOutput(s string) string {
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	s = strings.ReplaceAll(s, "\r", "\n")
+	s = strings.ReplaceAll(s, "\x00", "")
+	return s
+}
+
+// reProgressLine — строка прогресса долгой команды: sfc печатает
+// «Проверка 12% завершена.», DISM/chkdsk — полосы вида «[=====  12.7%  ]».
+var reProgressLine = regexp.MustCompile(`^\s*(?:\[[=\s]*\d{1,3}(?:[.,]\d)?%[=\s]*\]|Проверка\s+\d{1,3}\s*%\s+завершена\.?)\s*$`)
+
+// collapseProgress сворачивает подряд идущие строки прогресса в одну.
+// Зачем: у sfc и DISM таких строк сотни, и без сворачивания они съедают весь
+// лимит вывода — в прогоне 8 из-за них в отчёт не попала итоговая строка
+// проверки (она печатается последней). Реальные строки не трогаем.
+func collapseProgress(s string) string {
+	if !strings.Contains(s, "%") {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	out := make([]string, 0, len(lines))
+	for i := 0; i < len(lines); {
+		if !reProgressLine.MatchString(lines[i]) {
+			out = append(out, lines[i])
+			i++
+			continue
+		}
+		j := i
+		for j < len(lines) && reProgressLine.MatchString(lines[j]) {
+			j++
+		}
+		if skipped := j - i - 1; skipped > 0 {
+			out = append(out, fmt.Sprintf("…[пропущено %d строк прогресса]…", skipped))
+		}
+		out = append(out, lines[j-1]) // оставляем последнюю (самую свежую)
+		i = j
+	}
+	return strings.Join(out, "\n")
+}
+
 // finalizeOutput — единая точка обработки вывода команды: декодировать байты
-// консоли (cp866/cp1251) и убрать CLIXML-мусор PowerShell.
+// консоли (UTF-16/cp866/cp1251), убрать CLIXML-мусор PowerShell, привести
+// разделители строк к LF и свернуть строки прогресса.
 func finalizeOutput(raw []byte) string {
 	out := decodeConsoleBytes(raw)
-	cleaned, _ := stripCLIXML(out)
-	return cleaned
+	out, _ = stripCLIXML(out)
+	out = normalizeOutput(out)
+	return collapseProgress(out)
 }
 
 // ---------------------------------------------------------------------------

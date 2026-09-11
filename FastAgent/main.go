@@ -434,17 +434,54 @@ func hostname() string {
 	return h
 }
 
-// truncate обрезает вывод до n БАЙТ, но строго по границе руны: иначе на стыке
-// появлялся «битый» символ (U+FFFD) — в журнале и в контексте модели.
+// truncate обрезает вывод до n БАЙТ, сохраняя НАЧАЛО и КОНЕЦ, и строго по
+// границе руны: иначе на стыке появлялся «битый» символ (U+FFFD).
+//
+// Почему не только начало (дефект 18, прогон 8). У долгих команд итог печатается
+// ПОСЛЕДНИМ: у sfc — «Проверка 100% завершена. Защита ресурсов Windows не
+// обнаружила нарушений целостности.», у DISM — «Восстановление выполнено
+// успешно.». Отрезая хвост, агент отдавал модели и в отчёт только служебные
+// строки и прогресс — и вердикт команды терялся. В прогоне 8 из-за этого модель
+// не увидела итог sfc (4 минуты работы) и была вынуждена просить CBS-лог.
+// Поэтому хвост получает 2/3 бюджета, а начало — 1/3.
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
-	cut := n
-	for cut > 0 && !utf8.RuneStart(s[cut]) {
-		cut--
+	if n < 32 { // слишком маленький лимит для двух частей и пометки
+		return s[:runeFloor(s, n)]
 	}
-	return s[:cut] + fmt.Sprintf("…[обрезано %d симв.]", utf8.RuneCountInString(s)-utf8.RuneCountInString(s[:cut]))
+	tailBytes := n * 2 / 3
+	headEnd := runeFloor(s, n-tailBytes)
+	tailStart := runeCeil(s, len(s)-tailBytes)
+	if tailStart < headEnd {
+		tailStart = headEnd
+	}
+	head, tail := s[:headEnd], s[tailStart:]
+	dropped := len(s) - len(head) - len(tail)
+	return head + fmt.Sprintf("\n…[пропущено %d симв. середины — итог команды в конце]…\n", dropped) + tail
+}
+
+// runeFloor — индекс не больше n, стоящий на границе руны (резать не выше).
+func runeFloor(s string, n int) int {
+	if n >= len(s) {
+		return len(s)
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return n
+}
+
+// runeCeil — индекс не меньше n, стоящий на границе руны (резать не ниже).
+func runeCeil(s string, n int) int {
+	if n <= 0 {
+		return 0
+	}
+	for n < len(s) && !utf8.RuneStart(s[n]) {
+		n++
+	}
+	return n
 }
 
 // ---------------------------------------------------------------------------

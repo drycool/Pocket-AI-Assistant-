@@ -52,6 +52,16 @@ if not exist "%CFG%" (
 )
 if not exist "%LOGDIR%" mkdir "%LOGDIR%"
 
+rem --- предупреждение о правах: sfc/dism/wevtutil требуют администратора ---
+net session >nul 2>&1
+if errorlevel 1 (
+    echo [!] Скрипт запущен НЕ от администратора.
+    echo     Команды, которым нужны права ^(dism, sfc, некоторые wevtutil^),
+    echo     вернут код 1 или 5. Для полного теста закройте окно и запустите
+    echo     этот файл через правый клик -^> "Запуск от имени администратора".
+    echo.
+)
+
 echo [*] Сводный отчёт: %REPORT%
 echo.
 

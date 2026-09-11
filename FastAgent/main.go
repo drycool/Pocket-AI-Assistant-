@@ -37,6 +37,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // ---------------------------------------------------------------------------
@@ -418,11 +419,17 @@ func hostname() string {
 	return h
 }
 
+// truncate обрезает вывод до n БАЙТ, но строго по границе руны: иначе на стыке
+// появлялся «битый» символ (U+FFFD) — в журнале и в контексте модели.
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
-	return s[:n] + "…[обрезано]"
+	cut := n
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + fmt.Sprintf("…[обрезано %d симв.]", utf8.RuneCountInString(s)-utf8.RuneCountInString(s[:cut]))
 }
 
 // ---------------------------------------------------------------------------
@@ -938,12 +945,34 @@ func main() {
 		// Выполнение команд, предложенных моделью (в рамках уровня доступа).
 		cmds := extractCommands(answer)
 		for _, cmd := range cmds {
-			handled, output := handleCommand(reader, cfg, cmd)
-			if !handled {
+			res := handleCommand(reader, cfg, cmd)
+			if !res.handled {
+				// Модель обязана знать, что команда НЕ выполнена и почему: иначе
+				// она считает её успешной и/или предлагает тот же вариант снова.
+				history = append(history, Message{Role: "user",
+					Content: fmt.Sprintf("Команда `%s` НЕ выполнена: %s.", cmd, res.note)})
+				if cfg.AutoFollowup {
+					follow, _, _, ferr := streamAnswer(cfg, history)
+					if ferr == nil {
+						history = append(history, Message{Role: "assistant", Content: follow})
+					} else {
+						fmt.Printf("\n[ERROR] продолжение не удалось: %v\n", ferr)
+						history = history[:len(history)-1]
+					}
+				}
 				continue
 			}
-			history = append(history, Message{Role: "user",
-				Content: fmt.Sprintf("Вывод команды `%s` (код %s):\n%s", cmd, "0", truncate(output, 4000))})
+			// В историю уходит РЕАЛЬНЫЙ код возврата и длительность — раньше здесь
+			// был жёстко зашитый «код 0», из-за чего модель докладывала об успехе
+			// при коде 1 и пустом выводе (найдено в третьем полевом прогоне).
+			report := fmt.Sprintf("Вывод команды `%s` (код %d, %.2f с):\n%s",
+				cmd, res.code, res.dur.Seconds(), truncate(res.out, 4000))
+			if strings.TrimSpace(res.out) == "" {
+				report += "(вывод пустой)"
+			} else if res.code != 0 {
+				report += fmt.Sprintf("\n(обрати внимание: код возврата %d — команда завершилась с ошибкой)", res.code)
+			}
+			history = append(history, Message{Role: "user", Content: report})
 			if cfg.AutoFollowup {
 				follow, _, _, ferr := streamAnswer(cfg, history)
 				if ferr == nil {
@@ -997,7 +1026,16 @@ func systemPrompt() string {
 	}
 	return "Ты — карманный AI-инженер для выездной диагностики Windows/Linux. Отвечай кратко и по делу. " +
 		"Команду для запуска на гостевом ПК давай ОДНИМ блоком кода (```cmd ... ``` или ```bash ... ```), по одной команде в строке. " +
-		"Если команда для этого уровня запрещена — так и скажи. " + allowed
+		"Если команда для этого уровня запрещена — так и скажи. " + allowed +
+		" Всегда сверяйся со строкой `-> код N` и с блоком «Вывод команды … (код N)»: код != 0 или пустой вывод " +
+		"означают, что данных нет — в этом случае НЕ утверждай, что всё сработало, а назови вероятную причину " +
+		"(нет прав, фильтр не нашёл совпадений, сервис не запущен) и предложи другую команду. " +
+		"Русская Windows выводит ЛОКАЛИЗОВАННЫЕ подписи полей: в systeminfo это «Имя ОС», «Версия ОС», «Тип системы», " +
+		"поэтому не фильтруй вывод по английским подписям — `findstr /C:\"OS Name\"` на русской системе не найдёт ничего. " +
+		"Для сведений об ОС и железе бери команды, не зависящие от локали: " +
+		"`wmic os get Caption,Version,BuildNumber,OSArchitecture /value`, " +
+		"`Get-CimInstance Win32_OperatingSystem | Select-Object Caption,Version,BuildNumber,OSArchitecture | Format-List`, " +
+		"`ver`, `systeminfo` (без фильтра); для дисков — `wmic logicaldisk get DeviceID,Size,FreeSpace,VolumeName /value`."
 }
 
 func diagnosticsPrompt() string {
@@ -1008,18 +1046,32 @@ func diagnosticsPrompt() string {
 // readOnlyDiag — снимок системы только read-only командами.
 func readOnlyDiag() string {
 	if runtime.GOOS == "windows" {
-		return "systeminfo; ipconfig /all; Get-PSDrive -PSProvider FileSystem | Select-Object Name,Used,Free; " +
+		// Подписи полей локализованы, поэтому в снимок идут и команды, не
+		// зависящие от языка системы (WMI/CIM отдают одни и те же имена полей).
+		return "wmic os get Caption,Version,BuildNumber,OSArchitecture /value; ver; systeminfo; " +
+			"wmic logicaldisk get DeviceID,Size,FreeSpace,VolumeName /value; " +
+			"ipconfig /all; Get-PSDrive -PSProvider FileSystem | Select-Object Name,Used,Free; " +
 			"Get-EventLog -LogName System -EntryType Error -Newest 15 | Select-Object TimeGenerated,Source,Message | Format-List"
 	}
 	return "uname -a; uptime; free -h; df -h; ip -br addr; journalctl -p err -n 15 --no-pager 2>/dev/null | tail -20"
 }
 
+// cmdResult — итог обработки команды. Модели нужен РЕАЛЬНЫЙ код возврата и
+// причина отказа: иначе она считает невыполненную команду успешной (был баг:
+// в историю уходил жёстко зашитый «код 0», и агент докладывал «код 0» при коде 1).
+type cmdResult struct {
+	handled bool
+	out     string
+	code    int
+	dur     time.Duration
+	note    string // причина отказа, когда handled == false
+}
+
 // handleCommand — политика + подтверждение + запуск + журнал.
-// Возвращает (выполнено ли, вывод).
-func handleCommand(reader *bufio.Reader, cfg Config, cmd string) (bool, string) {
+func handleCommand(reader *bufio.Reader, cfg Config, cmd string) cmdResult {
 	cmd = strings.TrimSpace(cmd)
 	if cmd == "" {
-		return false, ""
+		return cmdResult{note: "пустая команда"}
 	}
 	verdict := classify(cmd, currentLevel)
 
@@ -1032,13 +1084,13 @@ func handleCommand(reader *bufio.Reader, cfg Config, cmd string) (bool, string) 
 			fmt.Println("        Если она действительно нужна — поднимите уровень: /level 3 (для опасных — двойное подтверждение).")
 		}
 		logAction(currentLevel, cmd, verdict, false, -1, "")
-		return false, ""
+		return cmdResult{note: fmt.Sprintf("запрещена политикой уровня L%d", currentLevel)}
 
 	case VNotAllowed:
 		fmt.Printf("\n[BLOCK] Команды нет в белом списке уровня L%d: %s\n", currentLevel, cmd)
 		fmt.Println("        Разрешить может только уровень L3 (/level 3).")
 		logAction(currentLevel, cmd, verdict, false, -1, "")
-		return false, ""
+		return cmdResult{note: fmt.Sprintf("нет в белом списке уровня L%d (нужен L3)", currentLevel)}
 
 	case VReadOnly:
 		fmt.Printf("\n[cmd] %s  (%s)\n", cmd, verdict)
@@ -1049,12 +1101,12 @@ func handleCommand(reader *bufio.Reader, cfg Config, cmd string) (bool, string) 
 			if !confirm(reader, "      Запустить? Введите yes для подтверждения: ", "yes") {
 				fmt.Println("      Отменено оператором.")
 				logAction(currentLevel, cmd, verdict, false, -1, "")
-				return false, ""
+				return cmdResult{note: "оператор не подтвердил запуск"}
 			}
 		} else if !confirm(reader, "      Запустить? (y/n): ", "y") {
 			fmt.Println("      Отменено оператором.")
 			logAction(currentLevel, cmd, verdict, false, -1, "")
-			return false, ""
+			return cmdResult{note: "оператор отказался"}
 		}
 	}
 
@@ -1062,11 +1114,20 @@ func handleCommand(reader *bufio.Reader, cfg Config, cmd string) (bool, string) 
 	out, code, _ := runCommand(cmd, 120*time.Second)
 	dur := time.Since(start)
 	fmt.Printf("      -> код %d, %.2f с\n", code, dur.Seconds())
-	if strings.TrimSpace(out) != "" {
+	if strings.TrimSpace(out) == "" {
+		// Пустой вывод — это тоже сигнал: команда не дала данных (фильтр не нашёл
+		// совпадений, нет прав, ошибка). Явно проговариваем, чтобы модель не
+		// докладывала об успехе.
+		if code == 0 {
+			fmt.Println("      [i] вывод пуст при коде 0 — данных нет (например, фильтр ничего не нашёл).")
+		} else {
+			fmt.Printf("      [i] вывод пуст при коде %d — успех не подтверждён.\n", code)
+		}
+	} else {
 		fmt.Printf("%s\n", strings.TrimRight(truncate(out, 4000), "\n"))
 	}
 	logAction(currentLevel, cmd, verdict, true, code, out)
-	return true, out
+	return cmdResult{handled: true, out: out, code: code, dur: dur}
 }
 
 var _ = sort.Strings // (зарезервировано под сортировку артефактов сессий)

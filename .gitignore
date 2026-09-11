@@ -8,6 +8,7 @@ Data/sessions-fast/*.json
 Data/sessions-fast/*.tmp
 Data/logs/fast-sysinfo_*.txt
 Data/logs/actions_*.log
+Data/logs/field-*.txt
 Data/reports/REPORT_FAST_*.md
 
 # Данные сессий и дампы систем

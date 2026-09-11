@@ -8,6 +8,7 @@ set "AGENT_BAT=%USB_DRIVE%bin\agent.bat"
 set "FF_BAT=%USB_DRIVE%bin\ff-portable.bat"
 set "CHECK_BAT=%USB_DRIVE%bin\check-ollama.bat"
 set "FAST_BAT=%USB_DRIVE%bin\agent-fast.bat"
+set "FASTTEST_BAT=%USB_DRIVE%scripts\field-test-fastagent.bat"
 set "REPORTS_DIR=%USB_DRIVE%Data\reports"
 set "LOGS_DIR=%USB_DRIVE%Data\logs"
 
@@ -22,9 +23,10 @@ echo  [3] Открыть папку с Отчетами (Data/reports)
 echo  [4] Открыть папку с Логами (Data/logs)
 echo  [5] Проверить связь с Ollama gpu2 (Локальная модель)
 echo  [6] FastAgent - быстрый агент (DeepSeek/облако, уровни доступа L0-L3)
+echo  [7] Полевой тест FastAgent (L0/L1/L2, отчет для отправки)
 echo  [0] Выход
 echo ===================================================
-set /p CHOICE="Выберите действие (0-6): "
+set /p CHOICE="Выберите действие (0-7): "
 
 if "%CHOICE%"=="1" goto RUN_AGENT
 if "%CHOICE%"=="2" goto RUN_FIREFOX
@@ -32,7 +34,24 @@ if "%CHOICE%"=="3" goto OPEN_REPORTS
 if "%CHOICE%"=="4" goto OPEN_LOGS
 if "%CHOICE%"=="5" goto CHECK_OLLAMA
 if "%CHOICE%"=="6" goto RUN_FAST
+if "%CHOICE%"=="7" goto RUN_FASTTEST
 if "%CHOICE%"=="0" exit
+goto MENU
+
+:RUN_FASTTEST
+cls
+echo ---------------------------------------------------
+echo [*] Полевой тест FastAgent: L0 -^> L1 -^> L2
+echo     Отчет будет в Data\logs\field-test-*.txt
+echo     На гостевом ПК ничего не меняется (только чтение
+echo     и один безопасный ipconfig /flushdns).
+echo ---------------------------------------------------
+if exist "%FASTTEST_BAT%" goto FASTTEST_RUN
+echo [ERROR] Не найден %FASTTEST_BAT%
+pause
+goto MENU
+:FASTTEST_RUN
+call "%FASTTEST_BAT%"
 goto MENU
 
 :RUN_FAST

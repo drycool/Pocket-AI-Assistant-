@@ -5,14 +5,24 @@
 
 ## Как запускать
 
-1. Скопировать папку проекта на флешку (вместе с `FastAgent\fastagent.exe`,
-   `Data\config.fast.json` с ключом DeepSeek, `tests\`, `scripts\`).
-2. Вставить флешку в гостевой ПК (SmartScreen: «Подробнее → Выполнить в любом случае»).
-3. Двойной щелчок: `scripts\field-test-fastagent.bat`
-   Либо вручную: `bin\agent-fast.bat 1` для интерактивной работы.
-4. Прислать файл `Data\logs\field-test-*.txt` + `Data\logs\actions_*.log`.
+Есть два пути — оба безопасны для гостевого ПК.
 
-Скрипт прогоняет 3 скриптованных сессии подряд (`-level 0`, `-level 1`, `-level 2`)
+**Вариант 1 (рекомендуемый, со сводным отчётом):**
+1. Скопировать папку проекта на флешку целиком. Проверить, что на ней есть:
+   - `FastAgent\fastagent.exe` (собран: `bash scripts/build-fast-agent.sh fast`);
+   - `Data\config.fast.json` — **с ключом DeepSeek** (этот файл в `.gitignore`, в git его нет;
+     если отсутствует — скопировать `Data\config.fast.example.json` в `config.fast.json` и вписать `api_key`);
+   - `tests\field-L0|L1|L2.txt`, `scripts\field-test-fastagent.bat`.
+2. Вставить флешку в гостевой ПК. При запуске `.exe` SmartScreen → «Подробнее → Выполнить в любом случае».
+3. Запустить `START.bat` → пункт **[7]**, либо двойным щелчком `scripts\field-test-fastagent.bat`.
+4. Забрать доказательства: `Data\logs\field-test-*.txt` (сводный отчёт),
+   `Data\logs\field-L{0,1,2}-*.txt` (стенограммы), `Data\logs\actions_*.log` (журнал команд).
+
+**Вариант 2 (интерактивно, для живого наблюдения):**
+`bin\agent-fast.bat 1` — обычная работа на L1 (только чтение), `/level 2` — поднять до починок
+(агент потребует ввода `yes` при повышении).
+
+Скрипт прогоняет три скриптованных сессии подряд (`-level 0`, `-level 1`, `-level 2`)
 с входом из `tests\field-L0.txt`, `tests\field-L1.txt`, `tests\field-L2.txt`.
 
 > На L2 выполняется только `ipconfig /flushdns` (безопасно). `netsh winsock reset`,

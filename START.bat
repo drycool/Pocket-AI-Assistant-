@@ -7,6 +7,7 @@ set "USB_DRIVE=%~dp0"
 set "AGENT_BAT=%USB_DRIVE%bin\agent.bat"
 set "FF_BAT=%USB_DRIVE%bin\ff-portable.bat"
 set "CHECK_BAT=%USB_DRIVE%bin\check-ollama.bat"
+set "FAST_BAT=%USB_DRIVE%bin\agent-fast.bat"
 set "REPORTS_DIR=%USB_DRIVE%Data\reports"
 set "LOGS_DIR=%USB_DRIVE%Data\logs"
 
@@ -20,16 +21,37 @@ echo  [2] Запустить Firefox Portable (Gemini Web UI)
 echo  [3] Открыть папку с Отчетами (Data/reports)
 echo  [4] Открыть папку с Логами (Data/logs)
 echo  [5] Проверить связь с Ollama gpu2 (Локальная модель)
+echo  [6] FastAgent - быстрый агент (DeepSeek/облако, уровни доступа L0-L3)
 echo  [0] Выход
 echo ===================================================
-set /p CHOICE="Выберите действие (0-5): "
+set /p CHOICE="Выберите действие (0-6): "
 
 if "%CHOICE%"=="1" goto RUN_AGENT
 if "%CHOICE%"=="2" goto RUN_FIREFOX
 if "%CHOICE%"=="3" goto OPEN_REPORTS
 if "%CHOICE%"=="4" goto OPEN_LOGS
 if "%CHOICE%"=="5" goto CHECK_OLLAMA
+if "%CHOICE%"=="6" goto RUN_FAST
 if "%CHOICE%"=="0" exit
+goto MENU
+
+:RUN_FAST
+cls
+echo ---------------------------------------------------
+echo [*] FastAgent: облачная модель + уровни доступа
+echo     L0 чат ^| L1 чтение ^| L2 починки ^| L3 полный доступ
+echo     Уровень по умолчанию задан в Data\config.fast.json
+echo ---------------------------------------------------
+if exist "%FAST_BAT%" goto FAST_RUN
+echo [ERROR] Не найден %FAST_BAT%
+pause
+goto MENU
+:FAST_RUN
+call "%FAST_BAT%"
+echo.
+echo ---------------------------------------------------
+echo [OK] Работа FastAgent завершена.
+pause
 goto MENU
 
 :RUN_AGENT

@@ -433,6 +433,47 @@ func truncate(s string, n int) string {
 }
 
 // ---------------------------------------------------------------------------
+// Права процесса (Windows): без повышения DISM/SFC/CHKDSK падают с кодом 740
+// (ERROR_ELEVATION_REQUIRED). Проверяем не по названиям групп (они локализованы
+// — «Администраторы» / «Administrators»), а по SID уровня целостности:
+//   S-1-16-16384 — System, S-1-16-12288 — High (процесс повышен),
+//   S-1-16-8192  — Medium (обычное окно), S-1-16-4096 — Low.
+// ---------------------------------------------------------------------------
+
+var (
+	reIntegritySID = regexp.MustCompile(`S-1-16-\d+`)
+	reElevation    = regexp.MustCompile(`(?i)(error:?\s*0*740\b|elevated permissions are required|` +
+		`требуются права администратора|запустите командную строку от имени администратора|` +
+		`you must be an administrator|requires? elevation)`)
+)
+
+// probePrivileges сообщает (повышен ли процесс, удалось ли определить).
+func probePrivileges() (elevated bool, known bool) {
+	if runtime.GOOS != "windows" {
+		return os.Geteuid() == 0, true
+	}
+	out, code, err := runCommand("whoami /groups", 20*time.Second)
+	if err != nil || code != 0 {
+		return false, false
+	}
+	for _, sid := range reIntegritySID.FindAllString(out, -1) {
+		switch sid {
+		case "S-1-16-16384", "S-1-16-12288":
+			return true, true
+		case "S-1-16-8192", "S-1-16-4096", "S-1-16-2048":
+			return false, true
+		}
+	}
+	return false, false
+}
+
+// isElevationError распознаёт ошибку «нужны права администратора» в выводе
+// команды (DISM печатает «Error: 740 ... Elevated permissions are required»).
+func isElevationError(out string) bool {
+	return reElevation.MatchString(out)
+}
+
+// ---------------------------------------------------------------------------
 // HTTP-клиент: стриминг (SSE) + обычный запрос
 // ---------------------------------------------------------------------------
 
@@ -825,6 +866,22 @@ func main() {
 		}
 		fmt.Printf("Кодировка вывода команд: %s (windows_encoding=%s)\n", cpName, encMode)
 	}
+	// Права процесса — не догадка, а факт: без повышения DISM/SFC/CHKDSK
+	// завершаются кодом 740 (ERROR_ELEVATION_REQUIRED). Раньше это выяснялось
+	// только по чужому выводу из логов, теперь агент говорит сам и пишет в журнал.
+	// Формулировка — windows-специфичная (740 = ошибка DISM), поэтому только Windows.
+	if runtime.GOOS == "windows" {
+		if elevated, known := probePrivileges(); known {
+			if elevated {
+				fmt.Println("[i] Права процесса: администратор (высокий уровень целостности) — dism/sfc/chkdsk доступны.")
+			} else {
+				fmt.Println("[!] Права процесса: обычный пользователь — dism/sfc/chkdsk вернут код 740.")
+				fmt.Println("    Для полной починки перезапустите агент от имени администратора.")
+			}
+			logAction(currentLevel, "probe-privileges", VReadOnly, true, 0,
+				fmt.Sprintf("elevated=%v", elevated))
+		}
+	}
 	fmt.Println("Команды: /level N — сменить уровень | /diag — собрать диагностику | /report — отчёт |")
 	fmt.Println("         /follow on|off — авто-продолжение | /clear — очистить контекст | exit — выход")
 	fmt.Println()
@@ -967,7 +1024,12 @@ func main() {
 			// при коде 1 и пустом выводе (найдено в третьем полевом прогоне).
 			report := fmt.Sprintf("Вывод команды `%s` (код %d, %.2f с):\n%s",
 				cmd, res.code, res.dur.Seconds(), truncate(res.out, 4000))
-			if strings.TrimSpace(res.out) == "" {
+			if res.elevation {
+				// Раньше вывод DISM «Error: 740 Elevated permissions are required»
+				// никак не комментировался, и причина падения команды терялась.
+				report += "\n(!) Код 740 = ERROR_ELEVATION_REQUIRED: команда запущена без прав администратора. " +
+					"Скажи об этом прямо и предложи перезапустить агент от имени администратора."
+			} else if strings.TrimSpace(res.out) == "" {
 				report += "(вывод пустой)"
 			} else if res.code != 0 {
 				report += fmt.Sprintf("\n(обрати внимание: код возврата %d — команда завершилась с ошибкой)", res.code)
@@ -1030,6 +1092,8 @@ func systemPrompt() string {
 		" Всегда сверяйся со строкой `-> код N` и с блоком «Вывод команды … (код N)»: код != 0 или пустой вывод " +
 		"означают, что данных нет — в этом случае НЕ утверждай, что всё сработало, а назови вероятную причину " +
 		"(нет прав, фильтр не нашёл совпадений, сервис не запущен) и предложи другую команду. " +
+		"«Error: 740» / «Elevated permissions are required» — это нехватка прав администратора: скажи прямо, " +
+		"что нужен запуск агента от имени администратора, и не предлагай ту же команду повторно. " +
 		"Русская Windows выводит ЛОКАЛИЗОВАННЫЕ подписи полей: в systeminfo это «Имя ОС», «Версия ОС», «Тип системы», " +
 		"поэтому не фильтруй вывод по английским подписям — `findstr /C:\"OS Name\"` на русской системе не найдёт ничего. " +
 		"Для сведений об ОС и железе бери команды, не зависящие от локали: " +
@@ -1049,6 +1113,7 @@ func readOnlyDiag() string {
 		// Подписи полей локализованы, поэтому в снимок идут и команды, не
 		// зависящие от языка системы (WMI/CIM отдают одни и те же имена полей).
 		return "wmic os get Caption,Version,BuildNumber,OSArchitecture /value; ver; systeminfo; " +
+			"whoami /groups; " + // SID уровня целостности: S-1-16-12288 = процесс повышен
 			"wmic logicaldisk get DeviceID,Size,FreeSpace,VolumeName /value; " +
 			"ipconfig /all; Get-PSDrive -PSProvider FileSystem | Select-Object Name,Used,Free; " +
 			"Get-EventLog -LogName System -EntryType Error -Newest 15 | Select-Object TimeGenerated,Source,Message | Format-List"
@@ -1060,11 +1125,12 @@ func readOnlyDiag() string {
 // причина отказа: иначе она считает невыполненную команду успешной (был баг:
 // в историю уходил жёстко зашитый «код 0», и агент докладывал «код 0» при коде 1).
 type cmdResult struct {
-	handled bool
-	out     string
-	code    int
-	dur     time.Duration
-	note    string // причина отказа, когда handled == false
+	handled   bool
+	out       string
+	code      int
+	dur       time.Duration
+	note      string // причина отказа, когда handled == false
+	elevation bool   // вывод содержит ошибку «нужны права администратора» (код 740)
 }
 
 // handleCommand — политика + подтверждение + запуск + журнал.
@@ -1114,6 +1180,10 @@ func handleCommand(reader *bufio.Reader, cfg Config, cmd string) cmdResult {
 	out, code, _ := runCommand(cmd, 120*time.Second)
 	dur := time.Since(start)
 	fmt.Printf("      -> код %d, %.2f с\n", code, dur.Seconds())
+	elevation := isElevationError(out)
+	if elevation {
+		fmt.Println("      [!] код 740 (ERROR_ELEVATION_REQUIRED): команда требует запуска от администратора.")
+	}
 	if strings.TrimSpace(out) == "" {
 		// Пустой вывод — это тоже сигнал: команда не дала данных (фильтр не нашёл
 		// совпадений, нет прав, ошибка). Явно проговариваем, чтобы модель не
@@ -1127,7 +1197,7 @@ func handleCommand(reader *bufio.Reader, cfg Config, cmd string) cmdResult {
 		fmt.Printf("%s\n", strings.TrimRight(truncate(out, 4000), "\n"))
 	}
 	logAction(currentLevel, cmd, verdict, true, code, out)
-	return cmdResult{handled: true, out: out, code: code, dur: dur}
+	return cmdResult{handled: true, out: out, code: code, dur: dur, elevation: elevation}
 }
 
 var _ = sort.Strings // (зарезервировано под сортировку артефактов сессий)

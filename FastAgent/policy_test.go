@@ -20,6 +20,55 @@ func TestClassify(t *testing.T) {
 		{"reg query HKLM\\Software", L1Read, VReadOnly},
 		{"uname -a", L1Read, VReadOnly},
 		{"whoami", L1Read, VReadOnly},
+		// Регрессия из репетиции полевого теста: свои же команды с флагами
+		{"ip -brief addr", L1Read, VReadOnly},
+		{"ip -4 addr show", L1Read, VReadOnly},
+		{"ip route", L1Read, VReadOnly},
+		{"grep -i error /var/log/syslog", L1Read, VReadOnly},
+		{"findstr /i error C:\\logs\\app.log", L1Read, VReadOnly},
+		{"df -h", L1Read, VReadOnly},
+		{"mount", L1Read, VReadOnly},
+		{"net view", L1Read, VReadOnly},
+		{"net share", L1Read, VReadOnly},
+		// И то, что читать нельзя: конвейер в интерпретатор, find -exec, sed -i, xargs
+		{"find / -name '*.log' -exec rm {} ;", L1Read, VForbidden},
+		{"find /tmp -name '*.tmp' -delete", L3Admin, VDangerous},
+		{"cat /etc/passwd | bash", L3Admin, VDangerous},
+		{"sed -i 's/a/b/' /etc/hosts", L3Admin, VDangerous}, // правка файла на месте = опасно
+		{"sed -n '1,20p' /etc/hosts", L3Admin, VNeedsYes},   // sed не в белом списке: ниже L3 не выполнится
+		{"xargs rm -f", L3Admin, VDangerous},
+		{"cat /etc/hosts | grep localhost", L1Read, VReadOnly},
+		// Обёртки powershell: read-only внутри — разрешено, изменяющее — нет
+		{`powershell -c "Get-Service | Where-Object Status -eq Stopped"`, L1Read, VReadOnly},
+		{`powershell -NoProfile -Command "Get-WinEvent -MaxEvents 10"`, L1Read, VReadOnly},
+		{`powershell -c "Get-CimInstance Win32_OperatingSystem | Select-Object Caption"`, L1Read, VReadOnly},
+		{`powershell -c "Remove-Item C:\data -Recurse -Force"`, L2Fix, VForbidden},
+		{`powershell -c "Remove-Item C:\data -Recurse -Force"`, L3Admin, VDangerous},
+		{`powershell -c "ipconfig /flushdns"`, L2Fix, VNeedsYes},
+		{`powershell -EncodedCommand ZgBvAG8A`, L3Admin, VDangerous},
+		{`powershell -EncodedCommand ZgBvAG8A`, L1Read, VForbidden},
+		// Короткие токены не должны матчиться по префиксу
+		{"wscript script.vbs", L1Read, VNotAllowed},
+		{"truncate -s 0 /var/log/syslog", L1Read, VNotAllowed},
+		{"filebeat --once", L1Read, VNotAllowed},
+		{"ifconfig -a", L1Read, VReadOnly},
+		{"top -b -n 1", L1Read, VReadOnly},
+		// Регрессия: PowerShell Format-Table в конвейере не должен считаться
+		// «форматированием диска» (было из-за \bformat\b)
+		{`Get-WinEvent -MaxEvents 10 | Format-Table TimeCreated, Id, Message -AutoSize`, L1Read, VReadOnly},
+		{`wevtutil qe System /c:10 /rd:true /f:text /q:"*[System[(Level=1 or Level=2)]]"`, L1Read, VReadOnly},
+		{"wevtutil cl System", L2Fix, VForbidden}, // очистка журнала — уничтожение следов
+		{"wevtutil cl System", L3Admin, VDangerous},
+		{"format D: /q", L2Fix, VForbidden},
+		{"format D: /q", L3Admin, VDangerous},
+		{"format.com C: /fs:ntfs", L3Admin, VDangerous},
+		// sudo не отменяет политику
+		{"sudo ip addr", L1Read, VReadOnly},
+		{"sudo systemd-resolve --flush-caches", L2Fix, VNeedsYes},
+		{"sudo rm -rf /", L3Admin, VDangerous},
+		{"chkdsk C: /scan", L1Read, VReadOnly},
+		{"chkdsk C: /f", L1Read, VNotAllowed},
+		{"chkdsk C: /f", L2Fix, VNeedsYes},
 
 		// Починки: только с L2 и с подтверждением.
 		{"ipconfig /flushdns", L1Read, VNotAllowed},

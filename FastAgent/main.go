@@ -129,29 +129,30 @@ func (v Verdict) String() string {
 }
 
 var (
+	// Группа 1: инструменты, у которых после имени обязателен пробел или конец строки.
+	// Якорь (\s|$) обязателен: без него `w` совпадёт с `wscript`,
+	// `tr` — с `truncate`, `file` — с `filetool` (реальная дыра, найдена на репетиции).
+	reReadTools = regexp.MustCompile(`^(ipconfig|systeminfo|whoami|hostname|netstat|tasklist|ping|tracert|pathping|nslookup|arp|getmac|type|dir|tree|where|ver|vol|echo|gpresult|driverquery|uptime|uname|df|free|ls|cat|ss|journalctl|lscpu|lspci|lsblk|dmidecode|sensors|dmesg|nmcli|ethtool|systemd-analyze|which|whereis|id|who|last|w|ps|vmstat|iostat|hostnamectl|timedatectl|localectl|printenv|env|ifconfig|iwconfig|mount|grep|egrep|fgrep|findstr|more|less|head|tail|sort|uniq|wc|cut|tr|nl|du|stat|file|locate|find|dnsclientcache)(\s|$)`)
+
 	reReadSafe = []*regexp.Regexp{
-		regexp.MustCompile(`^(ipconfig(\s|$))`), regexp.MustCompile(`^systeminfo`),
-		regexp.MustCompile(`^whoami`), regexp.MustCompile(`^hostname`),
-		regexp.MustCompile(`^netstat`), regexp.MustCompile(`^tasklist`),
-		regexp.MustCompile(`^ping\s`), regexp.MustCompile(`^tracert\s`), regexp.MustCompile(`^pathping\s`),
-		regexp.MustCompile(`^nslookup`), regexp.MustCompile(`^arp(\s|$)`),
-		regexp.MustCompile(`^route\s+print`), regexp.MustCompile(`^getmac`),
-		regexp.MustCompile(`^dnsclientcache|^ipconfig\s+/displaydns`),
-		regexp.MustCompile(`^type\s`), regexp.MustCompile(`^dir(\s|$)`), regexp.MustCompile(`^tree(\s|$)`),
-		regexp.MustCompile(`^where\s`), regexp.MustCompile(`^fsutil\s+(fsinfo|dirty|volume)`),
-		regexp.MustCompile(`^chkdsk\s*$`), regexp.MustCompile(`^sfc\s+/verifyonly`),
-		regexp.MustCompile(`^dism\s+/online\s+/cleanup-image\s+/scanhealth`),
+		reReadTools,
+		regexp.MustCompile(`^route\s+print`), regexp.MustCompile(`^ip\s+(-[a-z0-9]+\s+)*(a|addr|address|r|route|link|l|neigh|rule|maddr)`),
+		regexp.MustCompile(`^fsutil\s+(fsinfo|dirty|volume)`), regexp.MustCompile(`^chkdsk\s*$`),
+		regexp.MustCompile(`^chkdsk\s+[a-z]:\s*/scan`), // онлайн-сканирование без изменений
+		regexp.MustCompile(`^sfc\s+/verifyonly`), regexp.MustCompile(`^dism\s+/online\s+/cleanup-image\s+/scanhealth`),
 		regexp.MustCompile(`^netsh\s+(wlan\s+show|interface\s+show|advfirewall\s+show|firewall\s+show|int\s+ip\s+show)`),
 		regexp.MustCompile(`^sc\s+query`), regexp.MustCompile(`^schtasks\s+/query`),
 		regexp.MustCompile(`^reg\s+query`), regexp.MustCompile(`^wmic\s`),
-		regexp.MustCompile(`^gpresult`), regexp.MustCompile(`^driverquery`),
-		regexp.MustCompile(`^powercfg\s+/(a|query|list)`), regexp.MustCompile(`^ver(\s|$)`),
-		regexp.MustCompile(`^vol(\s|$)`), regexp.MustCompile(`^echo\s`), regexp.MustCompile(`^date\s+/t`),
+		regexp.MustCompile(`^powercfg\s+/(a|query|list)`), regexp.MustCompile(`^date\s+/t`),
+		regexp.MustCompile(`^systemctl\s+(status|is-active|show)`), regexp.MustCompile(`^resolvectl\s+status`),
+		regexp.MustCompile(`^smartctl\s+-[AaHh]`), regexp.MustCompile(`^crontab\s+-l`),
+		// top только в batch-режиме: интерактивный top заблокирует агента
+		regexp.MustCompile(`^top\s+-b`),
+		regexp.MustCompile(`^net\s+(view|share)\s*$`), regexp.MustCompile(`^net\s+view\s`),
+		// wevtutil qe/gl/el — чтение журналов; cl (очистка) вынесен в опасные
+		regexp.MustCompile(`^wevtutil\s+(qe|gl|el)\b`),
 		// PowerShell read-only глаголы
 		regexp.MustCompile(`^(get|test|measure|select|show|resolve|compare|format-list|out-string)-`),
-		// Linux-эквиваленты (флешка нужна и для Linux-гостей)
-		regexp.MustCompile(`^(uptime|uname|df(\s|$)|free(\s|$)|ls(\s|$)|cat\s|ip\s+(a|addr|r|route|link)|ss\s|journalctl\s|systemctl\s+(status|is-active)|lscpu|lspci|lsblk|dmidecode|sensors|dmesg)`),
-		regexp.MustCompile(`^(which|id|who|last|w|ps\s|top\s+-b|vmstat|iostat|smartctl\s+-[AaHh])`),
 	}
 
 	reFixAllowed = []*regexp.Regexp{
@@ -171,7 +172,7 @@ var (
 		regexp.MustCompile(`^optimize-volume`), regexp.MustCompile(`^defrag\s`),
 		regexp.MustCompile(`^powercfg\s+(-h\s+(on|off)|/setactive)`),
 		regexp.MustCompile(`^w32tm\s+/resync`), regexp.MustCompile(`^nbtstat\s+-R`),
-		regexp.MustCompile(`^sc\s+failure`), regexp.MustCompile(`^wevtutil\s+cl`),
+		regexp.MustCompile(`^sc\s+failure`),
 		// Linux
 		regexp.MustCompile(`^systemctl\s+(restart|start|stop|reload)\s`),
 		regexp.MustCompile(`^(apt|apt-get)\s+(update|upgrade|-f\s+install)`),
@@ -181,12 +182,16 @@ var (
 	}
 
 	reDanger = []*regexp.Regexp{
-		regexp.MustCompile(`\bformat\b`), regexp.MustCompile(`^diskpart`),
+		// ВАЖНО: не `\bformat\b` — иначе PowerShell `Format-Table` в конвейере
+		// считается опасным и read-only запросы журнала блокируются (найдено на репетиции).
+		regexp.MustCompile(`(^|[;&|]\s*)format\s+[a-z]:`), regexp.MustCompile(`(^|[;&|]\s*)format\s+/`),
+		regexp.MustCompile(`\bformat\.com\b`), regexp.MustCompile(`^diskpart`),
 		regexp.MustCompile(`^bcdedit`), regexp.MustCompile(`^reg\s+(delete|add|import)`),
 		regexp.MustCompile(`\bdel\s+/[fsq]`), regexp.MustCompile(`^(rd|rmdir)\s+/s`),
 		regexp.MustCompile(`^remove-item\s.*-recurse`), regexp.MustCompile(`^rm\s+-[rf]{1,2}\s`),
 		regexp.MustCompile(`^(takeown|icacls)\s.*(/grant|/f)`), regexp.MustCompile(`^cipher\s+/w`),
 		regexp.MustCompile(`^vssadmin\s+delete`), regexp.MustCompile(`^wbadmin\s+delete`),
+		regexp.MustCompile(`^wevtutil\s+cl`), // очистка журнала = уничтожение следов
 		regexp.MustCompile(`^set-executionpolicy`), regexp.MustCompile(`^(new|add)-(localuser|localgroupmember)`),
 		regexp.MustCompile(`^set-localuser`), regexp.MustCompile(`^enable-psremoting`),
 		regexp.MustCompile(`^winrm(\s|$)`), regexp.MustCompile(`^schtasks\s+/create`),
@@ -197,19 +202,78 @@ var (
 		regexp.MustCompile(`^rm\s+-rf\s+/(\s|$)`), regexp.MustCompile(`^chmod\s+777\s+/`),
 		regexp.MustCompile(`^useradd|^usermod|^passwd\s`), regexp.MustCompile(`^iptables\s+-F`),
 		regexp.MustCompile(`^crontab\s+-r`), regexp.MustCompile(`^killall\s`),
+		// find умеет запускать команды и удалять файлы
+		regexp.MustCompile(`^(find|locate)\s.*\s-(exec|execdir|delete|ok)\b`),
+		regexp.MustCompile(`\|\s*(bash|sh|zsh|cmd|powershell|pwsh|iex|invoke-expression)\b`), // конвейер в интерпретатор
+		regexp.MustCompile(`^sed\s+-i`), regexp.MustCompile(`^awk\s.*>\s*\S`), regexp.MustCompile(`^xargs\s`),
 	}
 )
+
+// unwrapShell снимает обёртки `powershell -c "..."` / `pwsh -Command "..."`.
+// Возвращает внутреннюю команду и признак «непрозрачная нагрузка»
+// (-EncodedCommand / -e): её нельзя разобрать, поэтому она всегда опасна.
+func unwrapShell(c string) (inner string, opaque bool) {
+	if !strings.HasPrefix(c, "powershell") && !strings.HasPrefix(c, "pwsh") {
+		return "", false
+	}
+	rest := strings.TrimSpace(c[strings.IndexByte(c, ' ')+1:])
+	// Флаги проверяем только ДО -c/-Command: внутри кавычек может встретиться
+	// что угодно (например `grep -e foo`), это не делает команду непрозрачной.
+	for _, tok := range strings.Fields(rest) {
+		lt := strings.Trim(tok, `"'`)
+		if lt == "-c" || lt == "/c" || strings.HasPrefix(lt, "-command") {
+			break
+		}
+		if lt == "-e" || lt == "-enc" || strings.HasPrefix(lt, "-encodedcommand") {
+			return "", true
+		}
+	}
+	for _, flag := range []string{"-c ", "-command ", "/c "} {
+		if i := strings.Index(rest, flag); i >= 0 {
+			in := strings.TrimSpace(rest[i+len(flag):])
+			in = strings.Trim(in, `"'`)
+			return in, false
+		}
+	}
+	return "", false
+}
 
 // classify — центральная точка политики: что делать с командой на уровне level.
 // Порядок проверок ВАЖЕН: сначала «опасное», затем «изменяющее», и только потом
 // «чтение». Иначе `ipconfig /flushdns` поймается общим правилом `^ipconfig`
 // и будет выполнен без подтверждения (регрессия закрыта тестом TestClassify).
 func classify(cmd string, level int) Verdict {
+	return classifyDepth(cmd, level, 0)
+}
+
+func classifyDepth(cmd string, level, depth int) Verdict {
 	c := strings.ToLower(strings.TrimSpace(cmd))
 	c = strings.TrimPrefix(c, "cmd /c ")
+	c = strings.TrimPrefix(c, "cmd.exe /c ")
+	// Повышение прав не отменяет политику: классифицируем саму команду
+	// (`sudo ip addr` = чтение, `sudo rm -rf /` = опасно). Пароль sudo
+	// неинтерактивно не запросится — команда просто упадёт.
+	for _, p := range []string{"sudo -n ", "sudo ", "doas ", "runas "} {
+		c = strings.TrimPrefix(c, p)
+	}
 	if c == "" {
 		return VForbidden
 	}
+
+	// Обёртки разворачиваем и классифицируем внутреннюю команду по тем же правилам:
+	// модель любит отдавать `powershell -c "Get-Service ..."`, и это не должно
+	// блокироваться на L1, а `powershell -c "Remove-Item -Recurse"` — должно.
+	if depth < 2 {
+		if inner, opaque := unwrapShell(c); opaque {
+			if level >= L3Admin {
+				return VDangerous
+			}
+			return VForbidden
+		} else if inner != "" && inner != c {
+			return classifyDepth(inner, level, depth+1)
+		}
+	}
+
 	for _, re := range reDanger {
 		if re.MatchString(c) {
 			if level >= L3Admin {

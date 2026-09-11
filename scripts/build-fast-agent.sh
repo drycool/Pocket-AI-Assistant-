@@ -8,9 +8,9 @@ TARGET="${1:-fast}"
 
 build_fast() {
   echo "[*] FastAgent: linux/arm64 (для отладки на Pi)"
-  (cd "$ROOT/FastAgent" && GOOS=linux GOARCH=arm64 go build -o /tmp/fastagent-linux main.go)
+  (cd "$ROOT/FastAgent" && GOOS=linux GOARCH=arm64 go build -o /tmp/fastagent-linux .)
   echo "[*] FastAgent: windows/amd64 -> FastAgent/fastagent.exe"
-  (cd "$ROOT/FastAgent" && GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o fastagent.exe main.go)
+  (cd "$ROOT/FastAgent" && GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o fastagent.exe .)
   ls -la "$ROOT/FastAgent/fastagent.exe"
 }
 

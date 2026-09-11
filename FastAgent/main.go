@@ -45,24 +45,34 @@ import (
 
 // Provider — источник модели. Порядок в списке = приоритет (fallback вниз).
 type Provider struct {
-	Name            string `json:"name"`
-	Type            string `json:"type"` // пока только "openai" (/v1/chat/completions)
-	BaseURL         string `json:"base_url"`
-	APIKey          string `json:"api_key"`
-	Model           string `json:"model"`
-	ReasoningEffort string `json:"reasoning_effort,omitempty"` // "none" для thinking-моделей Ollama
-	MaxTokens       int    `json:"max_tokens,omitempty"`       // переопределяет общий лимит
+	Name            string       `json:"name"`
+	Type            string       `json:"type"` // пока только "openai" (/v1/chat/completions)
+	BaseURL         string       `json:"base_url"`
+	APIKey          string       `json:"api_key"`
+	Model           string       `json:"model"`
+	ReasoningEffort string       `json:"reasoning_effort,omitempty"` // "none" отключает thinking (Ollama 0.33+, DeepSeek)
+	Thinking        *ThinkingOpt `json:"thinking,omitempty"`         // {"type":"disabled"} — DeepSeek: ответ на ~0.4 с раньше
+	MaxTokens       int          `json:"max_tokens,omitempty"`       // переопределяет общий лимит
+}
+
+// ThinkingOpt — параметр "thinking" для провайдеров DeepSeek-совместимого API.
+// Проверено на api.deepseek.com: {"type":"disabled"} убирает reasoning целиком
+// (0.71 с до первого токена против ~1.4 с и 80 чанков размышлений).
+type ThinkingOpt struct {
+	Type string `json:"type"` // "disabled" | "enabled"
 }
 
 type Config struct {
 	AccessLevel          int        `json:"access_level"`            // 0..3
 	Stream               bool       `json:"stream"`                  // SSE-стриминг ответа
 	AutoFollowup         bool       `json:"auto_followup"`           // отдавать вывод команды модели
+	ShowReasoning        bool       `json:"show_reasoning"`          // печатать "размышления" модели
 	MaxTokens            int        `json:"max_tokens"`              // лимит ответа
 	Temperature          float64    `json:"temperature"`             // 0 = детерминированно
 	FirstTokenTimeoutSec int        `json:"first_token_timeout_sec"` // ожидание первого токена
 	TotalTimeoutSec      int        `json:"total_timeout_sec"`       // общий таймаут запроса
 	HistoryLimit         int        `json:"history_limit"`           // сколько сообщений истории держать
+	WindowsEncoding      string     `json:"windows_encoding"`        // auto|cp866|cp1251|utf8|off — вывод команд Windows
 	Providers            []Provider `json:"providers"`
 }
 
@@ -71,11 +81,13 @@ func defaultConfig() Config {
 		AccessLevel:          0,
 		Stream:               true,
 		AutoFollowup:         true,
+		ShowReasoning:        false,
 		MaxTokens:            900,
 		Temperature:          0,
 		FirstTokenTimeoutSec: 25,
 		TotalTimeoutSec:      180,
 		HistoryLimit:         10,
+		WindowsEncoding:      "auto",
 	}
 }
 
@@ -418,12 +430,13 @@ func truncate(s string, n int) string {
 // ---------------------------------------------------------------------------
 
 type openAIRequest struct {
-	Model           string    `json:"model"`
-	Messages        []Message `json:"messages"`
-	Stream          bool      `json:"stream,omitempty"`
-	MaxTokens       int       `json:"max_tokens,omitempty"`
-	Temperature     *float64  `json:"temperature,omitempty"`
-	ReasoningEffort string    `json:"reasoning_effort,omitempty"`
+	Model           string       `json:"model"`
+	Messages        []Message    `json:"messages"`
+	Stream          bool         `json:"stream,omitempty"`
+	MaxTokens       int          `json:"max_tokens,omitempty"`
+	Temperature     *float64     `json:"temperature,omitempty"`
+	ReasoningEffort string       `json:"reasoning_effort,omitempty"`
+	Thinking        *ThinkingOpt `json:"thinking,omitempty"`
 }
 
 type openAIChunk struct {
@@ -453,6 +466,13 @@ var httpClient = &http.Client{
 	},
 }
 
+// Статистика последнего ответа для строки [v]: сколько символов ушло в
+// "размышления" и сколько времени они заняли (по умолчанию скрыты).
+var (
+	lastReasoningChars int
+	lastReasoningDur   time.Duration
+)
+
 func endpoint(p Provider) string {
 	base := strings.TrimRight(p.BaseURL, "/")
 	if strings.HasSuffix(base, "/chat/completions") {
@@ -472,6 +492,7 @@ func chatStream(p Provider, msgs []Message, cfg Config, onDelta func(string)) (s
 		MaxTokens:       pickInt(p.MaxTokens, cfg.MaxTokens),
 		Temperature:     &temp,
 		ReasoningEffort: p.ReasoningEffort,
+		Thinking:        p.Thinking,
 	}
 	payload, err := json.Marshal(body)
 	if err != nil {
@@ -519,9 +540,13 @@ func chatStream(p Provider, msgs []Message, cfg Config, onDelta func(string)) (s
 		if len(chunk.Choices) == 0 {
 			return "", 0, fmt.Errorf("ответ без choices")
 		}
-		text := chunk.Choices[0].Message.Content
-		if strings.TrimSpace(text) == "" {
-			text = chunk.Choices[0].Message.Reasoning
+		text := strings.TrimSpace(chunk.Choices[0].Message.Content)
+		if text == "" {
+			// Ответа нет — отдаем размышления, чтобы оператор не видел пустоту.
+			text = strings.TrimSpace(chunk.Choices[0].Message.Reasoning)
+			if text != "" {
+				text = "[reasoning] " + text
+			}
 		}
 		if text == "" {
 			return "", 0, fmt.Errorf("пустой ответ модели")
@@ -529,8 +554,14 @@ func chatStream(p Provider, msgs []Message, cfg Config, onDelta func(string)) (s
 		return text, 0, nil
 	}
 
-	var sb strings.Builder
-	var ttft time.Duration
+	// Стриминг. ВАЖНО: content и reasoning_content — разные потоки.
+	// DeepSeek/deepseek-flash сначала отдаёт сотни чанков reasoning_content
+	// (по-английски!), и если печатать их вживую, оператор видит «шёпот модели»
+	// вместо ответа, а ttft считается неверно. Печатаем ТОЛЬКО content;
+	// размышления копим и пускаем в дело лишь если content так и не пришёл
+	// (или если оператор включил show_reasoning).
+	var content, reasoning strings.Builder
+	var ttft, ttftReason time.Duration
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	for scanner.Scan() {
@@ -551,38 +582,59 @@ func chatStream(p Provider, msgs []Message, cfg Config, onDelta func(string)) (s
 		}
 		if chunk.Error != nil {
 			firstToken.Stop()
-			return sb.String(), ttft, fmt.Errorf("API: %s", chunk.Error.Message)
+			return content.String(), ttft, fmt.Errorf("API: %s", chunk.Error.Message)
 		}
 		if len(chunk.Choices) == 0 {
 			continue
 		}
 		d := chunk.Choices[0].Delta
-		piece := d.Content
-		if piece == "" {
-			piece = d.Reasoning
+
+		if piece := firstNonEmpty(d.Reasoning, d.Reasoning2); piece != "" {
+			if ttftReason == 0 {
+				ttftReason = time.Since(start)
+				firstToken.Stop() // провайдер жив: снимаем таймер «первого токена»
+			}
+			reasoning.WriteString(piece)
+			if cfg.ShowReasoning && onDelta != nil {
+				onDelta(piece)
+			}
 		}
-		if piece == "" {
-			piece = d.Reasoning2
-		}
-		if piece != "" {
+		if d.Content != "" {
 			if ttft == 0 {
 				ttft = time.Since(start)
 				firstToken.Stop()
 			}
-			sb.WriteString(piece)
+			content.WriteString(d.Content)
 			if onDelta != nil {
-				onDelta(piece)
+				onDelta(d.Content)
 			}
 		}
 	}
 	firstToken.Stop()
-	if err := scanner.Err(); err != nil && sb.Len() == 0 {
+	if err := scanner.Err(); err != nil && content.Len() == 0 && reasoning.Len() == 0 {
 		return "", 0, err
 	}
-	if sb.Len() == 0 {
+	if content.Len() == 0 {
+		if r := strings.TrimSpace(reasoning.String()); r != "" {
+			// Всё ушло в размышления — отдаем их, но без стриминга в консоль.
+			lastReasoningChars = len([]rune(r))
+			lastReasoningDur = ttftReason
+			return "[reasoning] " + r, ttftReason, nil
+		}
 		return "", 0, fmt.Errorf("пустой ответ модели")
 	}
-	return sb.String(), ttft, nil
+	lastReasoningChars = len([]rune(reasoning.String()))
+	lastReasoningDur = ttftReason
+	return content.String(), ttft, nil
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 func pickInt(a, b int) int {
@@ -635,10 +687,10 @@ func runCommand(cmd string, timeout time.Duration) (string, int, error) {
 			code = -1
 		}
 		if ctx.Err() == context.DeadlineExceeded {
-			return string(out) + "\n[timeout] команда прервана по таймауту", code, nil
+			return decodeConsoleBytes(out) + "\n[timeout] команда прервана по таймауту", code, nil
 		}
 	}
-	return string(out), code, nil
+	return decodeConsoleBytes(out), code, nil
 }
 
 var reCmdBlock = regexp.MustCompile("(?ms)```(?:cmd|bat|powershell|ps1|bash|sh|shell|console)?\\s*\\n(.*?)```")
@@ -712,6 +764,7 @@ func main() {
 		actionsLog = filepath.Join(logsDir, "actions_"+time.Now().Format("2006-01-02")+".log")
 	}
 	cfg = loadConfig()
+	setEncodingMode(cfg.WindowsEncoding)
 	if *levelFlag >= 0 && *levelFlag <= 3 {
 		cfg.AccessLevel = *levelFlag
 	}
@@ -733,6 +786,16 @@ func main() {
 	fmt.Printf("Уровень доступа: %s\n", levelLabels[currentLevel])
 	fmt.Printf("Стриминг: %v | авто-продолжение по выводу команды: %v | журнал: %s\n",
 		cfg.Stream, cfg.AutoFollowup, filepath.Base(actionsLog))
+	if runtime.GOOS == "windows" {
+		cpName := "cp866"
+		switch detectedConsoleCP() {
+		case 1251:
+			cpName = "cp1251"
+		case 65001:
+			cpName = "utf8"
+		}
+		fmt.Printf("Кодировка вывода команд: %s (windows_encoding=%s)\n", cpName, encMode)
+	}
 	fmt.Println("Команды: /level N — сменить уровень | /diag — собрать диагностику | /report — отчёт |")
 	fmt.Println("         /follow on|off — авто-продолжение | /clear — очистить контекст | exit — выход")
 	fmt.Println()
@@ -843,8 +906,12 @@ func main() {
 			continue
 		}
 		history = append(history, Message{Role: "assistant", Content: answer})
-		fmt.Printf("\n[v] %s | ttft %.2f с | ответ %d симв. | уровень L%d\n",
-			provider.Name, ttft.Seconds(), len(answer), currentLevel)
+		reasoningNote := ""
+		if lastReasoningChars > 0 && !cfg.ShowReasoning {
+			reasoningNote = fmt.Sprintf(" | размышлений %d симв. (%.2f с, скрыты)", lastReasoningChars, lastReasoningDur.Seconds())
+		}
+		fmt.Printf("\n[v] %s | ttft %.2f с | ответ %d симв. | уровень L%d%s\n",
+			provider.Name, ttft.Seconds(), len(answer), currentLevel, reasoningNote)
 
 		// Выполнение команд, предложенных моделью (в рамках уровня доступа).
 		cmds := extractCommands(answer)

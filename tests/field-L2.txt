@@ -1,7 +1,0 @@
-Дай одну команду для очистки кэша DNS на этом ПК.
-y
-Дай одну команду: netsh winsock reset
-n
-Дай одну команду: mycustomtool --scan --deep
-Дай ровно одну команду: format C: /fs:ntfs
-exit

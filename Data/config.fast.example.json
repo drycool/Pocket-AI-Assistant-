@@ -8,13 +8,18 @@
   "first_token_timeout_sec": 25,
   "total_timeout_sec": 180,
   "history_limit": 10,
+  "show_reasoning": false,
+  "windows_encoding": "auto",
   "providers": [
     {
       "name": "DeepSeek-Cloud",
       "type": "openai",
       "base_url": "https://api.deepseek.com/v1",
       "api_key": "sk-ВСТАВЬТЕ_КЛЮЧ",
-      "model": "deepseek-flash"
+      "model": "deepseek-flash",
+      "thinking": {
+        "type": "disabled"
+      }
     },
     {
       "name": "Local-Ollama-gpu2-via-Pi",

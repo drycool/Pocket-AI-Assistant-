@@ -4,12 +4,17 @@ setlocal enabledelayedexpansion
 
 rem ============================================================
 rem  Полевой тест FastAgent на гостевом Windows-ПК.
-rem  Прогоняет 3 скриптованных сессии (L0 / L1 / L2) и собирает
-rem  стенограммы + сводный отчёт в Data\logs\.
 rem
-rem  Безопасность: L0/L1 — только чтение. На L2 выполняется лишь
-rem  ipconfig /flushdns (безопасно), остальное должно быть
-rem  отклонено (n) или заблокировано. Гостевой ПК не меняется.
+rem  Пять ОТДЕЛЬНЫХ сессий (каждая со своим файлом ввода) — так ответы
+rem  y/n не "съедают" следующие вопросы:
+rem    L0    — команды выполняться не должны (блок)
+rem    L1    — только чтение, без подтверждения
+rem    L2-no — починка, оператор отказывает (n)
+rem    L2-yes— починка, оператор подтверждает (y)  [ipconfig /flushdns]
+rem    L2-blk— опасная (format) и незнакомая команда -> блок
+rem
+rem  Безопасность: гостевой ПК меняется только одним безобидным
+rem  сбросом кэша DNS в сессии L2-yes.
 rem
 rem  Запуск: двойной щелчок по этому файлу.
 rem ============================================================
@@ -50,23 +55,14 @@ if not exist "%LOGDIR%" mkdir "%LOGDIR%"
 echo [*] Сводный отчёт: %REPORT%
 echo.
 
-echo === [1/3] Уровень L0: команды выполняться НЕ должны ===
-"%EXE%" -level 0 < "%TESTS%field-L0.txt" > "%LOGDIR%\field-L0-!STAMP!.txt" 2>&1
-type "%LOGDIR%\field-L0-!STAMP!.txt"
-echo.
+call :RUN "L0"    "0" "field-L0.txt"        "команды выполняться НЕ должны"
+call :RUN "L1"    "1" "field-L1.txt"        "только чтение, без вопросов"
+call :RUN "L2-no" "2" "field-L2-fix-no.txt" "отказ оператора (n)"
+call :RUN "L2-yes" "2" "field-L2-fix-yes.txt" "подтверждение (y): ipconfig /flushdns"
+call :RUN "L2-blk" "2" "field-L2-block.txt" "format и незнакомая команда -> BLOCK"
 
-echo === [2/3] Уровень L1: только чтение, без подтверждения ===
-"%EXE%" -level 1 < "%TESTS%field-L1.txt" > "%LOGDIR%\field-L1-!STAMP!.txt" 2>&1
-type "%LOGDIR%\field-L1-!STAMP!.txt"
-echo.
-
-echo === [3/3] Уровень L2: починки с подтверждением, опасное - блок ===
-"%EXE%" -level 2 < "%TESTS%field-L2.txt" > "%LOGDIR%\field-L2-!STAMP!.txt" 2>&1
-type "%LOGDIR%\field-L2-!STAMP!.txt"
-echo.
-
-rem --- сводный отчёт: три стенограммы + журнал действий ---
-copy /b "%LOGDIR%\field-L0-!STAMP!.txt" + "%LOGDIR%\field-L1-!STAMP!.txt" + "%LOGDIR%\field-L2-!STAMP!.txt" "%REPORT%" >nul 2>&1
+rem --- сводный отчёт + журнал действий ---
+copy /b "%LOGDIR%\field-L0-!STAMP!.txt" + "%LOGDIR%\field-L1-!STAMP!.txt" + "%LOGDIR%\field-L2-no-!STAMP!.txt" + "%LOGDIR%\field-L2-yes-!STAMP!.txt" + "%LOGDIR%\field-L2-blk-!STAMP!.txt" "%REPORT%" >nul 2>&1
 if exist "%LOGDIR%\actions_*.log" (
     echo. >> "%REPORT%"
     echo ===== ЖУРНАЛ ДЕЙСТВИЙ ===== >> "%REPORT%"
@@ -77,9 +73,22 @@ echo ===================================================
 echo [OK] Тест завершён.
 echo.
 echo      Сводный отчёт : %REPORT%
-echo      Стенограммы   : %LOGDIR%\field-L0-!STAMP!.txt и др.
+echo      Стенограммы   : %LOGDIR%\field-L*-!STAMP!.txt
 echo      Журнал команд : %LOGDIR%\actions_*.log
 echo.
 echo      Пришлите сводный отчёт целиком.
 echo ===================================================
 pause
+exit /b 0
+
+:RUN
+set "TAG=%~1"
+set "LEVEL=%~2"
+set "INFILE=%~3"
+set "TITLE=%~4"
+set "OUT=%LOGDIR%\field-!TAG!-!STAMP!.txt"
+echo === [!TAG!] уровень L!LEVEL!: !TITLE! ===
+"%EXE%" -level !LEVEL! < "%TESTS%!INFILE!" > "!OUT!" 2>&1
+type "!OUT!"
+echo.
+exit /b 0

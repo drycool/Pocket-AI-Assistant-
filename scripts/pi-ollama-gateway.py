@@ -19,7 +19,7 @@ Ollama Gateway для Raspberry Pi (работает 24/7).
     не смогут включить сервер.
 
 Переменные окружения (опционально, есть значения по умолчанию):
-  GPU2_HOST   - адрес сервера с Ollama  (по умолчанию 192.168.0.87)
+  GPU2_HOST   - адрес сервера с Ollama  (по умолчанию 192.168.11.87)
   GPU2_PORT   - порт Ollama             (по умолчанию 11434)
   GPU2_MAC    - MAC gpu2 для Wake-on-LAN (по умолчанию 04:d9:f5:ae:f1:76)
   LISTEN_PORT - порт на Pi              (по умолчанию 11434)
@@ -38,7 +38,7 @@ import threading
 import time
 import urllib.request
 
-GPU2_HOST = os.environ.get("GPU2_HOST", "192.168.0.87")
+GPU2_HOST = os.environ.get("GPU2_HOST", "192.168.11.87")
 GPU2_PORT = int(os.environ.get("GPU2_PORT", "11434"))
 GPU2_MAC = os.environ.get("GPU2_MAC", "04:d9:f5:ae:f1:76")
 LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "11434"))
@@ -112,7 +112,7 @@ def wake_gpu2():
     """Wake-on-LAN: 6x0xFF + 16 повторов MAC, широковещательный UDP :9."""
     mac = bytes(int(x, 16) for x in GPU2_MAC.replace("-", ":").split(":"))
     packet = b"\xff" * 6 + mac * 16
-    for bcast in ("255.255.255.255", "192.168.0.255"):
+    for bcast in ("255.255.255.255", "192.168.11.255"):
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
                 s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)

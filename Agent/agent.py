@@ -29,6 +29,11 @@ def call_openai(provider, messages):
     url = base_url + "/chat/completions"
 
     body = {"model": provider.get("model"), "messages": messages}
+    # reasoning_effort="none" отключает thinking (qwen3/ornith на Ollama 0.33+).
+    if provider.get("reasoning_effort"):
+        body["reasoning_effort"] = provider["reasoning_effort"]
+    if provider.get("max_tokens"):
+        body["max_tokens"] = provider["max_tokens"]
     req = urllib.request.Request(
         url,
         data=json.dumps(body).encode("utf-8"),
@@ -46,8 +51,25 @@ def call_openai(provider, messages):
         raise RuntimeError(f"HTTP {e.code}: {e.read().decode('utf-8', 'ignore')}")
 
     choices = data.get("choices") or []
-    if choices and choices[0].get("message", {}).get("content", "").strip():
-        return choices[0]["message"]["content"]
+    if not choices:
+        raise RuntimeError(f"ответ без choices: {str(data)[:200]}")
+
+    message = choices[0].get("message", {})
+    content = (message.get("content") or "").strip()
+    if content:
+        return content
+
+    # content пуст: у thinking-моделей текст может уйти в reasoning.
+    reasoning = (message.get("reasoning") or "").strip()
+    if reasoning:
+        return "[reasoning] " + reasoning
+
+    if choices[0].get("finish_reason") == "length":
+        raise RuntimeError(
+            "ответ обрезан по лимиту токенов (finish_reason=length) — "
+            "увеличьте max_tokens или задайте reasoning_effort=none"
+        )
+
     return "Пустой ответ от модели."
 
 

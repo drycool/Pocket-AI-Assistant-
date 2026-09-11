@@ -34,7 +34,7 @@ Wants=network-online.target
 ExecStart=/usr/bin/env python3 ${DEST}
 Restart=always
 RestartSec=5
-Environment=GPU2_HOST=192.168.0.87
+Environment=GPU2_HOST=192.168.11.87
 Environment=GPU2_PORT=11434
 Environment=GPU2_MAC=04:d9:f5:ae:f1:76
 Environment=MODEL=qwen3:8b

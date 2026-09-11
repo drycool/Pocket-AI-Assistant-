@@ -59,13 +59,22 @@ type OpenAIMessage struct {
 type OpenAIRequest struct {
 	Model    string          `json:"model"`
 	Messages []OpenAIMessage `json:"messages"`
+	// ReasoningEffort: "none" отключает "размышления" thinking-моделей
+	// (qwen3, ornith) на Ollama 0.33+. Пустое значение не отправляется.
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	MaxTokens       int    `json:"max_tokens,omitempty"`
 }
 
 type OpenAIResponse struct {
 	Choices []struct {
 		Message struct {
 			Content string `json:"content"`
+			// Reasoning — "размышления" thinking-моделей (Ollama/DeepSeek-R1):
+			// если content пуст, а reasoning есть — отдаем его, чтобы
+			// инженер не видел «Пустой ответ».
+			Reasoning string `json:"reasoning"`
 		} `json:"message"`
+		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
 	Error *struct {
 		Message string `json:"message"`
@@ -86,6 +95,11 @@ type Provider struct {
 	BaseURL string `json:"base_url,omitempty"` // для openai: https://api.deepseek.com/v1
 	APIKey  string `json:"api_key"`
 	Model   string `json:"model"`
+	// ReasoningEffort — необязательное поле для openai-провайдеров.
+	// "none" отключает thinking (qwen3/ornith на Ollama 0.33+): ответ приходит
+	// сразу, без блока reasoning. Для облачных API оставляйте пустым.
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	MaxTokens       int    `json:"max_tokens,omitempty"`
 }
 
 type Config struct {
@@ -390,7 +404,12 @@ func callOpenAI(p Provider, history []Content, systemPrompt string) (string, err
 		messages = append(messages, OpenAIMessage{Role: role, Content: text})
 	}
 
-	reqBody, err := json.Marshal(OpenAIRequest{Model: p.Model, Messages: messages})
+	reqBody, err := json.Marshal(OpenAIRequest{
+		Model:           p.Model,
+		Messages:        messages,
+		ReasoningEffort: p.ReasoningEffort,
+		MaxTokens:       p.MaxTokens,
+	})
 	if err != nil {
 		return "", err
 	}
@@ -425,8 +444,24 @@ func callOpenAI(p Provider, history []Content, systemPrompt string) (string, err
 	if oaiResp.Error != nil {
 		return "", fmt.Errorf("API Error: %s", oaiResp.Error.Message)
 	}
-	if len(oaiResp.Choices) > 0 && strings.TrimSpace(oaiResp.Choices[0].Message.Content) != "" {
-		return oaiResp.Choices[0].Message.Content, nil
+	if len(oaiResp.Choices) == 0 {
+		return "", fmt.Errorf("ответ без choices (HTTP %d): %s", resp.StatusCode, strings.TrimSpace(string(bodyBytes)))
+	}
+
+	msg := oaiResp.Choices[0].Message
+	content := strings.TrimSpace(msg.Content)
+	if content != "" {
+		return content, nil
+	}
+
+	// content пуст: у thinking-моделей (qwen3, ornith, DeepSeek-R1) весь текст
+	// может уйти в reasoning. Отдаем его, чтобы не терять ответ.
+	if reasoning := strings.TrimSpace(msg.Reasoning); reasoning != "" {
+		return "[reasoning] " + reasoning, nil
+	}
+
+	if oaiResp.Choices[0].FinishReason == "length" {
+		return "", fmt.Errorf("ответ обрезан по лимиту токенов (finish_reason=length) — увеличьте max_tokens или задайте reasoning_effort=none")
 	}
 
 	return "Пустой ответ от модели.", nil

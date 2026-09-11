@@ -7,14 +7,15 @@ rem  Проверка связи с локальной моделью (Ollama н
 rem  + автонастройка Data\config.json под доступный адрес.
 rem
 rem  Приоритет эндпоинтов:
-rem    [1] Raspberry Pi 192.168.0.10:11434   - шлюз 24/7 (LAN): будит gpu2
+rem    [1] Raspberry Pi 192.168.11.111:11434   - шлюз 24/7 (LAN): будит gpu2
 rem    [2] Raspberry Pi 100.124.79.91:11434  - шлюз 24/7 (Tailscale):
 rem        работает из любой сети, сам будит gpu2
 rem    [3] gpu2 напрямую 100.121.254.115:11434 - Tailscale (из любой сети)
-rem    [4] Публичный 178.159.221.63:11434    - проброс порта на роутере,
-rem        работает из любого интернета БЕЗ Tailscale (нужен токен в
-rem        Data\config.public.json; проверка пропускается, если файла нет)
-rem    [5] gpu2 напрямую 192.168.0.87:11434  - LAN (без Tailscale)
+rem    [4] Публичный (адрес и порт из Data\config.public.json, порт 11434)
+rem        - проброс порта на роутере: работает из любого интернета БЕЗ
+rem        Tailscale (нужен токен в config.public.json; проверка
+rem        пропускается, если файла нет). Хост может быть IP или DDNS-именем.
+rem    [5] gpu2 напрямую 192.168.11.87:11434  - LAN (без Tailscale)
 rem
 rem  Использование:
 rem    check-ollama.bat          - ручной режим (пауза в конце)
@@ -22,7 +23,8 @@ rem    check-ollama.bat AUTO     - автоматический режим (дл
 rem ============================================================
 
 set "USB_DRIVE=%~dp0..\"
-set "PS1=%USB_DRIVE%scripts\check-ollama.ps1"
+set "SCRIPTS=%USB_DRIVE%scripts\"
+set "PS1=%SCRIPTS%check-ollama.ps1"
 set "CFG=%USB_DRIVE%Data\config.json"
 set "TPL_PI=%USB_DRIVE%Data\config.pi.json"
 set "TPL_PITS=%USB_DRIVE%Data\config.pi-ts.json"
@@ -35,13 +37,13 @@ echo.
 echo  === Проверка связи с Ollama на gpu2 ===
 
 rem ----- [1] Raspberry Pi по LAN (шлюз, будит gpu2) -----
-powershell -NoProfile -ExecutionPolicy Bypass -File "%PS1%" -HostIP 192.168.0.10 >nul 2>&1
+powershell -NoProfile -ExecutionPolicy Bypass -File "%PS1%" -HostIP 192.168.11.111 >nul 2>&1
 if errorlevel 1 goto :PI_KO
-echo   [OK]  Raspberry Pi 192.168.0.10:11434  - доступен, шлюз будит gpu2
+echo   [OK]  Raspberry Pi 192.168.11.111:11434  - доступен, шлюз будит gpu2
 set "PI_OK=1"
 goto :PITS_CHECK
 :PI_KO
-echo   [--]  Raspberry Pi 192.168.0.10:11434  - недоступен
+echo   [--]  Raspberry Pi 192.168.11.111:11434  - недоступен
 set "PI_OK=0"
 
 :PITS_CHECK
@@ -65,28 +67,42 @@ echo   [--]  Tailscale 100.121.254.115:11434  - недоступен
 set "TS_OK=0"
 
 :PUB_CHECK
-if exist "%TPL_PUB%" goto :PUB_TEST
+if exist "%TPL_PUB%" goto :PUB_RESOLVE
 set "PUB_OK=0"
-echo   [--]  Публичный 178.159.221.63:11434  - нет шаблона config.public.json
+echo   [--]  Публичный адрес  - нет шаблона config.public.json (сценарий C отключен)
 goto :LAN_CHECK
-:PUB_TEST
-powershell -NoProfile -ExecutionPolicy Bypass -File "%PS1%" -HostIP 178.159.221.63 >nul 2>&1
+:PUB_RESOLVE
+set "PUB_HOST="
+call :GET_PUB_HOST
+if "%PUB_HOST%"=="" goto :PUB_NOHOST
+echo   [*]  Публичный %PUB_HOST%:11434  - адрес взят из Data\config.public.json
+powershell -NoProfile -ExecutionPolicy Bypass -File "%PS1%" -HostIP %PUB_HOST% >nul 2>&1
 if errorlevel 1 goto :PUB_KO
-echo   [OK]  Публичный 178.159.221.63:11434  - доступен, работает без Tailscale
+echo   [OK]  Публичный %PUB_HOST%:11434  - доступен, работает без Tailscale
 set "PUB_OK=1"
 goto :LAN_CHECK
-:PUB_KO
-echo   [--]  Публичный 178.159.221.63:11434  - недоступен (проброс порта на роутере?)
+:PUB_NOHOST
 set "PUB_OK=0"
+echo   [--]  Публичный адрес  - не удалось прочитать base_url из config.public.json
+goto :LAN_CHECK
+:PUB_KO
+set "PUB_OK=0"
+echo   [--]  Публичный %PUB_HOST%:11434  - недоступен (проброс порта на роутере? сменился IP?)
+
+
+:GET_PUB_HOST
+for /f "usebackq delims=" %%H in (`powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPTS%get-public-host.ps1" -Config "%TPL_PUB%"`) do set "PUB_HOST=%%H"
+goto :EOF
+
 
 :LAN_CHECK
-powershell -NoProfile -ExecutionPolicy Bypass -File "%PS1%" -HostIP 192.168.0.87 >nul 2>&1
+powershell -NoProfile -ExecutionPolicy Bypass -File "%PS1%" -HostIP 192.168.11.87 >nul 2>&1
 if errorlevel 1 goto :LAN_KO
-echo   [OK]  LAN 192.168.0.87:11434  - доступен
+echo   [OK]  LAN 192.168.11.87:11434  - доступен
 set "LAN_OK=1"
 goto :PICK
 :LAN_KO
-echo   [--]  LAN 192.168.0.87:11434  - недоступен
+echo   [--]  LAN 192.168.11.87:11434  - недоступен
 set "LAN_OK=0"
 
 :PICK
@@ -102,7 +118,7 @@ goto :END
 
 :PICK_PI
 set "BEST=%TPL_PI%"
-echo   Рекомендуемый адрес: Raspberry Pi 192.168.0.10 (шлюз 24/7)
+echo   Рекомендуемый адрес: Raspberry Pi 192.168.11.111 (шлюз 24/7)
 goto :SYNC
 
 :PICK_PITS
@@ -117,12 +133,12 @@ goto :SYNC
 
 :PICK_PUB
 set "BEST=%TPL_PUB%"
-echo   Рекомендуемый адрес: Публичный 178.159.221.63 (через интернет)
+echo   Рекомендуемый адрес: Публичный %PUB_HOST% (через интернет, без Tailscale)
 goto :SYNC
 
 :PICK_LAN
 set "BEST=%TPL_LAN%"
-echo   Рекомендуемый адрес: LAN 192.168.0.87
+echo   Рекомендуемый адрес: LAN 192.168.11.87
 goto :SYNC
 
 :SYNC

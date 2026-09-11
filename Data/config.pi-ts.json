@@ -5,7 +5,8 @@
       "type": "openai",
       "base_url": "http://100.124.79.91:11434/v1",
       "api_key": "ollama",
-      "model": "qwen3:8b"
+      "model": "qwen3:8b",
+      "reasoning_effort": "none"
     }
   ]
 }

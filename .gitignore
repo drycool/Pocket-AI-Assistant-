@@ -15,3 +15,8 @@ Data/firefox/cache/*
 *.exe
 *.pyc
 __pycache__/
+
+# Резервные копии файлов (ручные .bak-YYYYMMDD / .bak)
+*.bak
+*.bak-*
+

@@ -15,6 +15,7 @@ package main
 import (
 	"encoding/base64"
 	"fmt"
+	"html"
 	"os/exec"
 	"regexp"
 	"runtime"
@@ -197,6 +198,78 @@ func decodeConsoleBytes(b []byte) string {
 		// идентичен, а для русского — единственный осмысленный вариант.
 		return rescueMojibake(b, decodeTable(b, cp866Runes))
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Вывод PowerShell: CLIXML вместо текста
+// ---------------------------------------------------------------------------
+
+// Проблема (дефект 15, полевой прогон 7). Когда стандартный вывод и stderr
+// PowerShell перенаправлены в pipe (а мы читаем именно так), он сериализует
+// потоки ошибок и прогресса в CLIXML — служебный XML вместо текста:
+//
+//	#< CLIXML
+//	<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04">
+//	<Obj S="progress" ...><AV>Preparing modules for first use.</AV>...</Obj>
+//	<S S="Error">Get-Item : Cannot bind argument to parameter 'Path' because it is null._x000D__x000A_</S>
+//	</Objs>
+//
+// Эти килобайты мусора уходили и в консоль оператора, и в отчёт, и в контекст
+// модели (в прогоне 7 модель даже объясняла их пользователю: «CLIXML-обёртка —
+// это просто сериализация прогресс-записей»). Прогресс-записи не нужны вообще,
+// а ошибки нужны ЧЕЛОВЕЧЕСКИМ текстом.
+var (
+	reCLIXMLBlock = regexp.MustCompile(`(?s)(?:#< CLIXML[ \t]*\r?\n)?<Objs\b[^>]*>.*?</Objs>`)
+	reCLIXMLEntry = regexp.MustCompile(`(?s)<S S="[^"]*">(.*?)</S>`)
+	reCLIXMLMarks = regexp.MustCompile(`(?m)^#< CLIXML[ \t]*$`)
+)
+
+// stripCLIXML заменяет CLIXML-блоки на читаемый текст (`[stderr] …`) и
+// возвращает количество восстановленных строк ошибок. Прогресс-записи
+// отбрасываются: они не несут диагностической ценности.
+func stripCLIXML(out string) (string, int) {
+	if !strings.Contains(out, "#< CLIXML") && !strings.Contains(out, "<Objs Version=") {
+		return out, 0
+	}
+	recovered := 0
+	out = reCLIXMLBlock.ReplaceAllStringFunc(out, func(block string) string {
+		var lines []string
+		for _, m := range reCLIXMLEntry.FindAllStringSubmatch(block, -1) {
+			if txt := decodeCLIXMLText(m[1]); txt != "" {
+				lines = append(lines, "[stderr] "+txt)
+				recovered++
+			}
+		}
+		if len(lines) == 0 {
+			return "" // только progress-записи — выкидываем целиком
+		}
+		return "\n" + strings.Join(lines, "\n") + "\n"
+	})
+	out = reCLIXMLMarks.ReplaceAllString(out, "")
+	return out, recovered
+}
+
+// decodeCLIXMLText разбирает текст одной записи CLIXML: убирает escapes вида
+// _x000D_/_x000A_, раскрывает XML-сущности и снимает удвоение обратного слэша
+// (CLIXML экранирует `\` как `\\`, поэтому в отчёте пути выглядели так:
+// C:\\путь\\к\\mycustomtool.exe).
+func decodeCLIXMLText(s string) string {
+	for _, e := range [][2]string{
+		{"_x000D_", "\r"}, {"_x000A_", "\n"}, {"_x0009_", "\t"}, {"_x0020_", " "},
+	} {
+		s = strings.ReplaceAll(s, e[0], e[1])
+	}
+	s = strings.ReplaceAll(s, `\\`, `\`)
+	s = html.UnescapeString(s)
+	return strings.TrimRight(s, "\r\n\t ")
+}
+
+// finalizeOutput — единая точка обработки вывода команды: декодировать байты
+// консоли (cp866/cp1251) и убрать CLIXML-мусор PowerShell.
+func finalizeOutput(raw []byte) string {
+	out := decodeConsoleBytes(raw)
+	cleaned, _ := stripCLIXML(out)
+	return cleaned
 }
 
 // ---------------------------------------------------------------------------

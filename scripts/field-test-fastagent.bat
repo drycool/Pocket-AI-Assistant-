@@ -12,6 +12,9 @@ rem    L1    — только чтение, без подтверждения
 rem    L2-no — починка, оператор отказывает (n)
 rem    L2-yes— починка, оператор подтверждает (y)  [ipconfig /flushdns]
 rem    L2-blk— опасная (format) и незнакомая команда -> блок
+rem    L2-sfc— проверка целостности: sfc /scannow + dism /restorehealth
+rem            (единственное место, где проверяются команды, работающие
+rem            десятки минут; для них таймаут поднят до 45 мин)
 rem
 rem  Безопасность: гостевой ПК меняется только одним безобидным
 rem  сбросом кэша DNS в сессии L2-yes.
@@ -33,7 +36,7 @@ set "STAMP=!D!_!T:~0,6!"
 set "REPORT=%LOGDIR%\field-test-!STAMP!.txt"
 
 echo ===================================================
-echo   FIELD TEST: FastAgent (L0 / L1 / L2)
+echo   FIELD TEST: FastAgent (L0 / L1 / L2-no / L2-yes / L2-blk / L2-sfc)
 echo ===================================================
 echo.
 
@@ -101,9 +104,10 @@ call :RUN "L1"    "1" "field-L1.txt"        "только чтение, без �
 call :RUN "L2-no" "2" "field-L2-fix-no.txt" "отказ оператора (n)"
 call :RUN "L2-yes" "2" "field-L2-fix-yes.txt" "подтверждение (y): ipconfig /flushdns"
 call :RUN "L2-blk" "2" "field-L2-block.txt" "format и незнакомая команда -> BLOCK"
+call :RUN "L2-sfc" "2" "field-L2-sfc.txt"   "проверка целостности: sfc + dism (подтверждение y)"
 
 rem --- сводный отчёт + журнал действий ---
-copy /b "%LOGDIR%\field-L0-!STAMP!.txt" + "%LOGDIR%\field-L1-!STAMP!.txt" + "%LOGDIR%\field-L2-no-!STAMP!.txt" + "%LOGDIR%\field-L2-yes-!STAMP!.txt" + "%LOGDIR%\field-L2-blk-!STAMP!.txt" + "%LOGDIR%\field-policy-!STAMP!.txt" + "%LOGDIR%\field-selftest-!STAMP!.txt" "%REPORT%" >nul 2>&1
+copy /b "%LOGDIR%\field-L0-!STAMP!.txt" + "%LOGDIR%\field-L1-!STAMP!.txt" + "%LOGDIR%\field-L2-no-!STAMP!.txt" + "%LOGDIR%\field-L2-yes-!STAMP!.txt" + "%LOGDIR%\field-L2-blk-!STAMP!.txt" + "%LOGDIR%\field-L2-sfc-!STAMP!.txt" + "%LOGDIR%\field-policy-!STAMP!.txt" + "%LOGDIR%\field-selftest-!STAMP!.txt" "%REPORT%" >nul 2>&1
 if exist "%LOGDIR%\actions_*.log" (
     echo. >> "%REPORT%"
     echo ===== ЖУРНАЛ ДЕЙСТВИЙ ===== >> "%REPORT%"

@@ -730,6 +730,32 @@ func sendMessage(cfg Config, msgs []Message, onDelta func(string)) (string, Prov
 // Выполнение команд на гостевом ПК
 // ---------------------------------------------------------------------------
 
+// commandTimeout — пер-командный таймаут. Обычной команде 120 с с запасом
+// хватает, но sfc /scannow, dism /restorehealth и chkdsk работают минутами
+// (на живом ПК это 5–40 мин). С общим таймаутом 120 с они гарантированно
+// обрывались бы строкой «[timeout]», то есть данные по ним получить было
+// нельзя вообще — ровно та дырка в покрытии, которую не удавалось закрыть
+// четыре прогона подряд (прогоны 3–7: оператор всё подтверждал, но команду
+// никто не предлагал либо она не успевала доработать).
+func commandTimeout(cmd string) time.Duration {
+	c := strings.ToLower(strings.TrimSpace(cmd))
+	// Обёртки снимаем: `cmd /c "sfc /scannow"` и `powershell -c "dism …"`
+	// должны получить длинный таймаут, а не 120 с (иначе обрыв на первой минуте).
+	if inner, opaque := unwrapShell(c); inner != "" && !opaque {
+		c = strings.TrimSpace(inner)
+	}
+	for _, p := range []string{"cmd /c ", "cmd.exe /c "} {
+		c = strings.TrimPrefix(c, p)
+	}
+	c = strings.Trim(strings.TrimSpace(c), `"'`)
+	for _, p := range []string{"sfc ", "dism ", "chkdsk", "vssadmin", "cleanmgr", "compact /c"} {
+		if strings.HasPrefix(c, p) {
+			return 45 * time.Minute
+		}
+	}
+	return 120 * time.Second
+}
+
 func runCommand(cmd string, timeout time.Duration) (string, int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -777,10 +803,10 @@ func runCommand(cmd string, timeout time.Duration) (string, int, error) {
 			code = -1
 		}
 		if ctx.Err() == context.DeadlineExceeded {
-			return decodeConsoleBytes(out) + "\n[timeout] команда прервана по таймауту", code, nil
+			return finalizeOutput(out) + "\n[timeout] команда прервана по таймауту", code, nil
 		}
 	}
-	return decodeConsoleBytes(out), code, nil
+	return finalizeOutput(out), code, nil
 }
 
 var reCmdBlock = regexp.MustCompile("(?ms)```(?:cmd|bat|powershell|ps1|bash|sh|shell|console)?\\s*\\n(.*?)```")
@@ -1221,7 +1247,12 @@ func handleCommand(reader *bufio.Reader, cfg Config, cmd string) cmdResult {
 	}
 
 	start := time.Now()
-	out, code, _ := runCommand(cmd, 120*time.Second)
+	tmo := commandTimeout(cmd)
+	if tmo > 120*time.Second {
+		fmt.Printf("      [i] длинная операция: таймаут поднят до %d мин (sfc/dism/chkdsk проверяют систему минутами).\n",
+			int(tmo.Minutes()))
+	}
+	out, code, _ := runCommand(cmd, tmo)
 	dur := time.Since(start)
 	fmt.Printf("      -> код %d, %.2f с\n", code, dur.Seconds())
 	elevation := isElevationError(out)

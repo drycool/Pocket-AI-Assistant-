@@ -317,9 +317,17 @@ func utf16ToString(b []byte, little bool) (string, bool) {
 // это просто сериализация прогресс-записей»). Прогресс-записи не нужны вообще,
 // а ошибки нужны ЧЕЛОВЕЧЕСКИМ текстом.
 var (
-	reCLIXMLBlock = regexp.MustCompile(`(?s)(?:#< CLIXML[ \t]*\r?\n)?<Objs\b[^>]*>.*?</Objs>`)
+	// Префикс «#< CLIXML» может отделяться от XML ПУСТЫМИ строками (PowerShell
+	// печатает маркер, затем перевод строки) — дефект 19, прогон 9: маркер
+	// оставался в отчёте отдельной строкой, потому что в шаблоне был только один
+	// перевод строки.
+	reCLIXMLBlock = regexp.MustCompile(`(?s)(?:#< CLIXML[ 	]*\r?\n(?:[ 	]*\r?\n)*)?<Objs\b[^>]*>.*?</Objs>`)
 	reCLIXMLEntry = regexp.MustCompile(`(?s)<S S="[^"]*">(.*?)</S>`)
-	reCLIXMLMarks = regexp.MustCompile(`(?m)^#< CLIXML[ \t]*$`)
+	// \r? в конце — иначе на CRLF-выводе (а он приходит именно таким) маркер не
+	// совпадает: (?m)$ стоит перед \n, а перед ним остаётся \r.
+	reCLIXMLMarks = regexp.MustCompile(`(?m)^[ 	]*#< CLIXML[ 	]*\r?$`)
+	// Подряд идущие пустые строки, оставшиеся после вырезания маркеров.
+	reBlankRun = regexp.MustCompile(`\n{3,}`)
 )
 
 // stripCLIXML заменяет CLIXML-блоки на читаемый текст (`[stderr] …`) и
@@ -344,6 +352,7 @@ func stripCLIXML(out string) (string, int) {
 		return "\n" + strings.Join(lines, "\n") + "\n"
 	})
 	out = reCLIXMLMarks.ReplaceAllString(out, "")
+	out = reBlankRun.ReplaceAllString(out, "\n\n")
 	return out, recovered
 }
 
@@ -381,6 +390,11 @@ var reProgressLine = regexp.MustCompile(`^\s*(?:\[[=\s]*\d{1,3}(?:[.,]\d)?%[=\s]
 // Зачем: у sfc и DISM таких строк сотни, и без сворачивания они съедают весь
 // лимит вывода — в прогоне 8 из-за них в отчёт не попала итоговая строка
 // проверки (она печатается последней). Реальные строки не трогаем.
+//
+// Дефект 20, прогон 9: DISM печатает каждую полосу отдельной строкой с ПУСТОЙ
+// строкой после неё, поэтому серия выглядела как «одна полоса — пустая строка —
+// одна полоса» и не сворачивалась вовсе: 4023 символа полос вытеснили из вывода
+// всё остальное. Пустые строки внутри серии прогресса считаем частью серии.
 func collapseProgress(s string) string {
 	if !strings.Contains(s, "%") {
 		return s
@@ -393,26 +407,45 @@ func collapseProgress(s string) string {
 			i++
 			continue
 		}
-		j := i
-		for j < len(lines) && reProgressLine.MatchString(lines[j]) {
-			j++
+		j, n := i, 0
+		for j < len(lines) {
+			if reProgressLine.MatchString(lines[j]) {
+				n++
+				j++
+				continue
+			}
+			// пустая строка между полосами — та же серия
+			if strings.TrimSpace(lines[j]) == "" && j+1 < len(lines) && reProgressLine.MatchString(lines[j+1]) {
+				j++
+				continue
+			}
+			break
 		}
-		if skipped := j - i - 1; skipped > 0 {
-			out = append(out, fmt.Sprintf("…[пропущено %d строк прогресса]…", skipped))
+		if n > 1 {
+			out = append(out, fmt.Sprintf("…[пропущено %d строк прогресса]…", n-1))
 		}
-		out = append(out, lines[j-1]) // оставляем последнюю (самую свежую)
+		// Оставляем последнюю (самую свежую) строку серии.
+		last := j
+		for last > i && !reProgressLine.MatchString(lines[last]) {
+			last--
+		}
+		out = append(out, lines[last])
 		i = j
 	}
 	return strings.Join(out, "\n")
 }
 
 // finalizeOutput — единая точка обработки вывода команды: декодировать байты
-// консоли (UTF-16/cp866/cp1251), убрать CLIXML-мусор PowerShell, привести
-// разделители строк к LF и свернуть строки прогресса.
+// консоли (UTF-16/cp866/cp1251), привести разделители строк к LF, убрать
+// CLIXML-мусор PowerShell и свернуть строки прогресса.
+//
+// Порядок важен: нормализация строк идёт ДО разбора CLIXML, иначе регулярное
+// выражение маркера «#< CLIXML» спотыкается о \r перед \n и маркер остаётся в
+// выводе отдельной строкой (дефект 19, прогон 9).
 func finalizeOutput(raw []byte) string {
 	out := decodeConsoleBytes(raw)
-	out, _ = stripCLIXML(out)
 	out = normalizeOutput(out)
+	out, _ = stripCLIXML(out)
 	return collapseProgress(out)
 }
 

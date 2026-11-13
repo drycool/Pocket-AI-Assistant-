@@ -112,7 +112,8 @@ func (s *serveState) handleIndex(w http.ResponseWriter, r *http.Request) {
 func (s *serveState) answer(msgs []Message) (string, Provider, time.Duration, error) {
 	cfg := s.cfg
 	cfg.Stream = false
-	return sendMessage(cfg, msgs, nil)
+	text, _, p, ttft, err := sendMessage(cfg, msgs, nil, nil)
+	return text, p, ttft, err
 }
 
 func (s *serveState) handleChat(w http.ResponseWriter, r *http.Request) {

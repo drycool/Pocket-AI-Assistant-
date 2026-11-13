@@ -76,6 +76,7 @@ type Config struct {
 	WindowsEncoding      string     `json:"windows_encoding"`        // auto|cp866|cp1251|utf8|off — вывод команд Windows
 	Providers            []Provider `json:"providers"`
 	Rag                  RagConfig  `json:"rag"` // слой знаний (Jev/LightRAG); пусто = памяти нет
+	MCP                  MCPConfig  `json:"mcp"` // внешние инструменты (этап 10); пусто = только встроенные
 }
 
 func defaultConfig() Config {
@@ -94,9 +95,13 @@ func defaultConfig() Config {
 }
 
 // Message — сообщение в формате OpenAI-совместимого API.
+// ToolCalls/ToolCallID нужны декларативным инструментам (этап 10): ассистент
+// возвращает вызовы, а результаты уходят сообщениями role=tool.
 type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role       string     `json:"role"`
+	Content    string     `json:"content"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -538,6 +543,8 @@ type openAIRequest struct {
 	Temperature     *float64     `json:"temperature,omitempty"`
 	ReasoningEffort string       `json:"reasoning_effort,omitempty"`
 	Thinking        *ThinkingOpt `json:"thinking,omitempty"`
+	Tools           []ToolDef    `json:"tools,omitempty"`
+	ToolChoice      string       `json:"tool_choice,omitempty"`
 }
 
 type openAIChunk struct {
@@ -546,10 +553,27 @@ type openAIChunk struct {
 			Content    string `json:"content"`
 			Reasoning  string `json:"reasoning_content"`
 			Reasoning2 string `json:"reasoning"`
+			ToolCalls  []struct {
+				Index    int    `json:"index"`
+				ID       string `json:"id"`
+				Type     string `json:"type"`
+				Function struct {
+					Name      string `json:"name"`
+					Arguments string `json:"arguments"`
+				} `json:"function"`
+			} `json:"tool_calls"`
 		} `json:"delta"`
 		Message struct {
 			Content   string `json:"content"`
 			Reasoning string `json:"reasoning_content"`
+			ToolCalls []struct {
+				ID       string `json:"id"`
+				Type     string `json:"type"`
+				Function struct {
+					Name      string `json:"name"`
+					Arguments string `json:"arguments"`
+				} `json:"function"`
+			} `json:"tool_calls"`
 		} `json:"message"`
 		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
@@ -582,9 +606,16 @@ func endpoint(p Provider) string {
 	return base + "/chat/completions"
 }
 
-// chatStream отправляет запрос и стримит ответ. Возвращает текст ответа и время
-// до первого токена. onDelta вызывается на каждый фрагмент (печать в реальном времени).
-func chatStream(p Provider, msgs []Message, cfg Config, onDelta func(string)) (string, time.Duration, error) {
+// chatStream отправляет запрос и стримит ответ. Возвращает текст, вызовы
+// инструментов (если модель их запросила) и время до первого токена.
+// onDelta вызывается на каждый фрагмент текста (печать в реальном времени).
+//
+// Tool calling (этап 10): декларации инструментов уходят в поле tools, а
+// вызовы приходят в delta.tool_calls кусками — name один раз, arguments
+// построчно. Собираем их по index до целого вызова. Если провайдер tools не
+// умеет, sendMessage повторит запрос без них, и модель вернёт конверт
+// ```tool ...``` (запасной путь в tools.go).
+func chatStream(p Provider, msgs []Message, cfg Config, tools []ToolDef, onDelta func(string)) (string, []ToolCall, time.Duration, error) {
 	temp := cfg.Temperature
 	body := openAIRequest{
 		Model:           p.Model,
@@ -594,10 +625,14 @@ func chatStream(p Provider, msgs []Message, cfg Config, onDelta func(string)) (s
 		Temperature:     &temp,
 		ReasoningEffort: p.ReasoningEffort,
 		Thinking:        p.Thinking,
+		Tools:           tools,
+	}
+	if len(tools) > 0 {
+		body.ToolChoice = "auto"
 	}
 	payload, err := json.Marshal(body)
 	if err != nil {
-		return "", 0, err
+		return "", nil, 0, err
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.TotalTimeoutSec)*time.Second)
@@ -605,7 +640,7 @@ func chatStream(p Provider, msgs []Message, cfg Config, onDelta func(string)) (s
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint(p), bytes.NewReader(payload))
 	if err != nil {
-		return "", 0, err
+		return "", nil, 0, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+p.APIKey)
@@ -619,40 +654,48 @@ func chatStream(p Provider, msgs []Message, cfg Config, onDelta func(string)) (s
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		firstToken.Stop()
-		return "", 0, err
+		return "", nil, 0, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		firstToken.Stop()
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return "", 0, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+		return "", nil, 0, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
 	}
 	if !cfg.Stream {
 		firstToken.Stop()
 		var chunk openAIChunk
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		if err := json.Unmarshal(raw, &chunk); err != nil {
-			return "", 0, err
+			return "", nil, 0, err
 		}
 		if chunk.Error != nil {
-			return "", 0, fmt.Errorf("API: %s", chunk.Error.Message)
+			return "", nil, 0, fmt.Errorf("API: %s", chunk.Error.Message)
 		}
 		if len(chunk.Choices) == 0 {
-			return "", 0, fmt.Errorf("ответ без choices")
+			return "", nil, 0, fmt.Errorf("ответ без choices")
+		}
+		var calls []ToolCall
+		for _, tc := range chunk.Choices[0].Message.ToolCalls {
+			calls = append(calls, ToolCall{
+				ID:       tc.ID,
+				Type:     firstNonEmpty(tc.Type, "function"),
+				Function: ToolFunction{Name: tc.Function.Name, Arguments: tc.Function.Arguments},
+			})
 		}
 		text := strings.TrimSpace(chunk.Choices[0].Message.Content)
-		if text == "" {
+		if text == "" && len(calls) == 0 {
 			// Ответа нет — отдаем размышления, чтобы оператор не видел пустоту.
 			text = strings.TrimSpace(chunk.Choices[0].Message.Reasoning)
 			if text != "" {
 				text = "[reasoning] " + text
 			}
 		}
-		if text == "" {
-			return "", 0, fmt.Errorf("пустой ответ модели")
+		if text == "" && len(calls) == 0 {
+			return "", nil, 0, fmt.Errorf("пустой ответ модели")
 		}
-		return text, 0, nil
+		return text, calls, 0, nil
 	}
 
 	// Стриминг. ВАЖНО: content и reasoning_content — разные потоки.
@@ -663,6 +706,7 @@ func chatStream(p Provider, msgs []Message, cfg Config, onDelta func(string)) (s
 	// (или если оператор включил show_reasoning).
 	var content, reasoning strings.Builder
 	var ttft, ttftReason time.Duration
+	accs := map[int]*toolCallAcc{}
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	for scanner.Scan() {
@@ -683,12 +727,30 @@ func chatStream(p Provider, msgs []Message, cfg Config, onDelta func(string)) (s
 		}
 		if chunk.Error != nil {
 			firstToken.Stop()
-			return content.String(), ttft, fmt.Errorf("API: %s", chunk.Error.Message)
+			return content.String(), finishToolCalls(accs), ttft, fmt.Errorf("API: %s", chunk.Error.Message)
 		}
 		if len(chunk.Choices) == 0 {
 			continue
 		}
 		d := chunk.Choices[0].Delta
+
+		for _, tc := range d.ToolCalls {
+			acc := accs[tc.Index]
+			if acc == nil {
+				acc = &toolCallAcc{}
+				accs[tc.Index] = acc
+			}
+			if tc.ID != "" {
+				acc.id = tc.ID
+			}
+			if tc.Type != "" {
+				acc.typ = tc.Type
+			}
+			if tc.Function.Name != "" {
+				acc.name = tc.Function.Name
+			}
+			acc.args.WriteString(tc.Function.Arguments)
+		}
 
 		if piece := firstNonEmpty(d.Reasoning, d.Reasoning2); piece != "" {
 			if ttftReason == 0 {
@@ -712,21 +774,60 @@ func chatStream(p Provider, msgs []Message, cfg Config, onDelta func(string)) (s
 		}
 	}
 	firstToken.Stop()
-	if err := scanner.Err(); err != nil && content.Len() == 0 && reasoning.Len() == 0 {
-		return "", 0, err
+	calls := finishToolCalls(accs)
+	if err := scanner.Err(); err != nil && content.Len() == 0 && reasoning.Len() == 0 && len(calls) == 0 {
+		return "", nil, 0, err
 	}
 	if content.Len() == 0 {
+		if len(calls) > 0 {
+			// Чистый tool call без текста — это не ошибка: модель просит
+			// инструмент и ждёт результата.
+			return "", calls, ttft, nil
+		}
 		if r := strings.TrimSpace(reasoning.String()); r != "" {
 			// Всё ушло в размышления — отдаем их, но без стриминга в консоль.
 			lastReasoningChars = len([]rune(r))
 			lastReasoningDur = ttftReason
-			return "[reasoning] " + r, ttftReason, nil
+			return "[reasoning] " + r, nil, ttftReason, nil
 		}
-		return "", 0, fmt.Errorf("пустой ответ модели")
+		return "", nil, 0, fmt.Errorf("пустой ответ модели")
 	}
 	lastReasoningChars = len([]rune(reasoning.String()))
 	lastReasoningDur = ttftReason
-	return content.String(), ttft, nil
+	return content.String(), calls, ttft, nil
+}
+
+// toolCallAcc — накопитель потокового tool_calls по index.
+type toolCallAcc struct {
+	id, typ, name string
+	args          strings.Builder
+}
+
+// finishToolCalls собирает куски в целые вызовы в порядке index (индекс задаёт
+// модель; порядок прихода кусков — нет).
+func finishToolCalls(accs map[int]*toolCallAcc) []ToolCall {
+	idx := make([]int, 0, len(accs))
+	for i := range accs {
+		idx = append(idx, i)
+	}
+	sort.Ints(idx)
+	var out []ToolCall
+	for _, i := range idx {
+		a := accs[i]
+		if a.name == "" {
+			continue
+		}
+		id := a.id
+		if id == "" {
+			id = fmt.Sprintf("call_%d_%d", time.Now().UnixNano(), i)
+		}
+		out = append(out, ToolCall{
+			ID:       id,
+			Type:     firstNonEmpty(a.typ, "function"),
+			Function: ToolFunction{Name: a.name, Arguments: a.args.String()},
+		})
+	}
+	return out
 }
 
 func firstNonEmpty(vals ...string) string {
@@ -746,22 +847,37 @@ func pickInt(a, b int) int {
 }
 
 // sendMessage — fallback по провайдерам: первый успешный побеждает.
-func sendMessage(cfg Config, msgs []Message, onDelta func(string)) (string, Provider, time.Duration, error) {
+// Если провайдер не знает tools API (HTTP 400/422), запрос повторяется без
+// деклараций: модель вернёт конверт ```tool ...```, и путь инструментов
+// продолжает работать. Иначе «нет tools» означало бы «нет инструментов».
+func sendMessage(cfg Config, msgs []Message, tools []ToolDef, onDelta func(string)) (string, []ToolCall, Provider, time.Duration, error) {
 	var errs []string
 	for i, p := range cfg.Providers {
 		if strings.TrimSpace(p.Model) == "" || strings.TrimSpace(p.BaseURL) == "" {
 			continue
 		}
-		text, ttft, err := chatStream(p, msgs, cfg, onDelta)
+		text, calls, ttft, err := chatStream(p, msgs, cfg, tools, onDelta)
+		if err != nil && len(tools) > 0 && toolsUnsupported(err) {
+			fmt.Printf("\n[tools] %s не принял tools API (%v) → повтор без деклараций, через конверт\n", p.Name, err)
+			text, calls, ttft, err = chatStream(p, msgs, cfg, nil, onDelta)
+		}
 		if err == nil {
-			return text, p, ttft, nil
+			return text, calls, p, ttft, nil
 		}
 		errs = append(errs, fmt.Sprintf("%s: %v", p.Name, err))
 		if i < len(cfg.Providers)-1 {
 			fmt.Printf("\n[fallback] %s недоступен (%v) → следующий провайдер\n", p.Name, err)
 		}
 	}
-	return "", Provider{}, 0, fmt.Errorf("все провайдеры недоступны: %s", strings.Join(errs, " | "))
+	return "", nil, Provider{}, 0, fmt.Errorf("все провайдеры недоступны: %s", strings.Join(errs, " | "))
+}
+
+// toolsUnsupported — ошибка «этот провайдер не знает поле tools». Значения
+// кода мало: 400 бывает и по другим причинам, поэтому смотрим ещё и текст.
+func toolsUnsupported(err error) bool {
+	s := strings.ToLower(err.Error())
+	code := strings.Contains(s, "http 400") || strings.Contains(s, "http 422") || strings.Contains(s, "http 404")
+	return code && (strings.Contains(s, "tool") || strings.Contains(s, "function"))
 }
 
 // ---------------------------------------------------------------------------
@@ -901,6 +1017,10 @@ func saveSession(file, id string, history []Message) {
 
 var currentLevel int
 
+// toolsEnabled — включены ли декларативные инструменты. В HTTP-режиме (--serve)
+// выключены: сервер честно не исполняет ничего, что просит модель.
+var toolsEnabled bool
+
 // ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
@@ -918,6 +1038,7 @@ func main() {
 		"запустить встроенный HTTP-сервер с Web UI (этап 9; команды в этом режиме не выполняются)")
 	portFlag := flag.Int("port", 8888, "порт встроенного сервера (--serve)")
 	tokenFlag := flag.String("token", "", "токен доступа к встроенному серверу (без него — только localhost)")
+	askFlag := flag.String("ask", "", "задать один вопрос, выполнить инструменты и выйти (без REPL)")
 	flag.Parse()
 
 	initPaths()
@@ -940,9 +1061,14 @@ func main() {
 	currentLevel = cfg.AccessLevel
 
 	if *serveFlag {
+		// В HTTP-режиме инструменты выключены: команды и запись файлов по HTTP
+		// не выполняются (решение этапа 9, оно не меняется этапом 10).
 		runServe(cfg, currentLevel, *portFlag, *tokenFlag)
 		return
 	}
+
+	toolsEnabled = true
+	initMCP(cfg)
 
 	reader := bufio.NewReader(os.Stdin)
 
@@ -960,6 +1086,11 @@ func main() {
 	fmt.Printf("Уровень доступа: %s\n", levelLabels[currentLevel])
 	fmt.Printf("Стриминг: %v | авто-продолжение по выводу команды: %v | журнал: %s\n",
 		cfg.Stream, cfg.AutoFollowup, filepath.Base(actionsLog))
+	if defs := toolDefsForLevel(currentLevel); len(defs) > 0 {
+		fmt.Printf("Инструменты (L%d): %s\n", currentLevel, toolSummary(currentLevel))
+	} else {
+		fmt.Println("Инструменты: read_file/grep_search/file_glob_search — с L1, write_file — с L2 (сейчас L0).")
+	}
 	if runtime.GOOS == "windows" {
 		cpName := "cp866"
 		switch detectedConsoleCP() {
@@ -991,6 +1122,12 @@ func main() {
 		// чтение, остальное блокируется и попадает в журнал (см. selftest.go).
 		os.Exit(runSelfTest(currentLevel, cfg))
 	}
+	if strings.TrimSpace(*askFlag) != "" {
+		// Неинтерактивный ход: тот же агент с инструментами, но без REPL.
+		// Нужен и для скриптов, и для живой проверки «модель реально вызывает
+		// инструмент, а не рассказывает о нём».
+		os.Exit(runAsk(cfg, *askFlag))
+	}
 	fmt.Println("Команды: /level N — сменить уровень | /diag — собрать диагностику | /report — отчёт |")
 	fmt.Println("         /rag ВОПРОС — спросить базу знаний | /rag graph ВОПРОС — граф LightRAG |")
 	fmt.Println("         /follow on|off — авто-продолжение | /clear — очистить контекст | exit — выход")
@@ -1020,6 +1157,7 @@ func main() {
 		switch {
 		case low == "exit" || low == "quit" || low == "выход":
 			saveSession(sessionFile, sessionID, history)
+			closeMCP()
 			fmt.Println("\n[OK] Сессия сохранена. Выход.")
 			return
 
@@ -1101,7 +1239,7 @@ func main() {
 			fmt.Println(truncate(ans.Text, 6000))
 			history = append(history, Message{Role: "user",
 				Content: "Справка из базы знаний (" + ans.MetaLine() + "):\n" + truncate(ans.Text, 6000)})
-			answer, provider, ttft, aerr := streamAnswer(cfg, history)
+			answer, _, provider, ttft, aerr := streamAnswer(cfg, history, nil)
 			if aerr != nil {
 				fmt.Printf("[ERROR] %v\n", aerr)
 				history = history[:len(history)-1]
@@ -1115,7 +1253,7 @@ func main() {
 
 		case low == "/report":
 			history = append(history, Message{Role: "user", Content: "Сформируй итоговый технический отчёт на русском в Markdown: проблема, что нашли, что сделали, статус, рекомендации. Без блоков кода с командами."})
-			report, p, ttft, err := streamAnswer(cfg, history)
+			report, _, p, ttft, err := streamAnswer(cfg, history, nil)
 			if err != nil {
 				fmt.Printf("[ERROR] %v\n", err)
 				history = history[:len(history)-1]
@@ -1129,14 +1267,17 @@ func main() {
 			continue
 		}
 
+		base := len(history)
 		history = append(history, Message{Role: "user", Content: input})
-		answer, provider, ttft, err := streamAnswer(cfg, history)
+		var answer string
+		var provider Provider
+		var ttft time.Duration
+		history, answer, provider, ttft, err = runAgentTurn(cfg, history, turnOptions{reader: reader})
 		if err != nil {
 			fmt.Printf("\n[ERROR] %v\n", err)
-			history = history[:len(history)-1]
+			history = history[:base]
 			continue
 		}
-		history = append(history, Message{Role: "assistant", Content: answer})
 		reasoningNote := ""
 		if lastReasoningChars > 0 && !cfg.ShowReasoning {
 			reasoningNote = fmt.Sprintf(" | размышлений %d симв. (%.2f с, скрыты)", lastReasoningChars, lastReasoningDur.Seconds())
@@ -1154,7 +1295,7 @@ func main() {
 				history = append(history, Message{Role: "user",
 					Content: fmt.Sprintf("Команда `%s` НЕ выполнена: %s.", cmd, res.note)})
 				if cfg.AutoFollowup {
-					follow, _, _, ferr := streamAnswer(cfg, history)
+					follow, _, _, _, ferr := streamAnswer(cfg, history, nil)
 					if ferr == nil {
 						history = append(history, Message{Role: "assistant", Content: follow})
 					} else {
@@ -1181,7 +1322,7 @@ func main() {
 			}
 			history = append(history, Message{Role: "user", Content: report})
 			if cfg.AutoFollowup {
-				follow, _, _, ferr := streamAnswer(cfg, history)
+				follow, _, _, _, ferr := streamAnswer(cfg, history, nil)
 				if ferr == nil {
 					history = append(history, Message{Role: "assistant", Content: follow})
 				} else {
@@ -1195,31 +1336,61 @@ func main() {
 	}
 }
 
+// runAsk — один неинтерактивный ход с инструментами (флаг -ask).
+func runAsk(cfg Config, question string) int {
+	history := []Message{{Role: "user", Content: question}}
+	history, answer, provider, ttft, err := runAgentTurn(cfg, history, turnOptions{reader: nil})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "\n[ERROR] %v\n", err)
+		return 1
+	}
+	fmt.Printf("\n[v] %s | ttft %.2f с | ответ %d симв. | уровень L%d\n",
+		provider.Name, ttft.Seconds(), len(answer), currentLevel)
+	sessionID := time.Now().Format("2006-01-02_15-04-05") + "_ask_" + hostname()
+	saveSession(filepath.Join(sessionsDir, sessionID+".json"), sessionID, history)
+	closeMCP()
+	return 0
+}
+
 // streamAnswer — единая точка стриминга с печатью «по мере поступления».
-func streamAnswer(cfg Config, history []Message) (string, Provider, time.Duration, error) {
+func streamAnswer(cfg Config, history []Message, tools []ToolDef) (string, []ToolCall, Provider, time.Duration, error) {
 	msgs := buildMessages(cfg, history)
 	fmt.Print("\nAI > ")
-	text, provider, ttft, err := sendMessage(cfg, msgs, func(piece string) {
+	text, calls, provider, ttft, err := sendMessage(cfg, msgs, tools, func(piece string) {
 		fmt.Print(piece)
 	})
 	fmt.Println()
 	if err != nil {
-		return "", provider, 0, err
+		return "", nil, provider, 0, err
 	}
-	return text, provider, ttft, nil
+	return text, calls, provider, ttft, nil
 }
 
 // buildMessages: короткий системный промпт с текущей политикой доступа +
 // подрезанная история (скорость важнее «памяти» всей переписки).
+// Обрезка не имеет права отрезать assistant(tool_calls) от его tool-ответов:
+// иначе API получит role=tool без предшествующего вызова и отвергнет запрос.
 func buildMessages(cfg Config, history []Message) []Message {
 	msgs := []Message{{Role: "system", Content: systemPrompt()}}
 	if len(history) > cfg.HistoryLimit {
-		history = history[len(history)-cfg.HistoryLimit:]
+		start := len(history) - cfg.HistoryLimit
+		for start < len(history) && history[start].Role == "tool" {
+			start++
+		}
+		history = history[start:]
 	}
 	return append(msgs, history...)
 }
 
 func systemPrompt() string {
+	base := systemPromptBase()
+	if toolsEnabled {
+		base += " " + toolSystemPrompt()
+	}
+	return base
+}
+
+func systemPromptBase() string {
 	var allowed string
 	switch currentLevel {
 	case L0Chat:

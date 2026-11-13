@@ -195,11 +195,16 @@
 - [x] 7 новых тестов (`rag_test.go`), всего 68 проверок; живой прогон: exact_fts, 153 мс.
 - [x] Конфиг: блок `"rag": {"url", "graph_url", "execute"}` в примере и на флешке.
 
-## ЭТАП 9 (план): `fastagent.exe --serve` — API + встроенный UI
-- [ ] `GET /` — embed-страница чата (без внешних библиотек; открывается в Firefox Portable).
-- [ ] `POST /v1/chat/completions` — OpenAI-совместимый endpoint для Page Assist/Open WebUI.
-- [ ] Только `127.0.0.1` + токен; в HTTP-режиме **команды не выполняются** (чат и
-      диагностика чтением). Исполнение — только в консоли с подтверждениями.
+## ЭТАП 9: `fastagent.exe --serve` — API + встроенный UI (MVP сделан 13.11.2026)
+- [x] `GET /` — embed-страница чата (`ui.html`, без внешних библиотек; Firefox Portable).
+- [x] `POST /api/chat`, `GET /api/diag` (L1+, чтение), `POST /api/report`.
+- [x] `POST /v1/chat/completions` — OpenAI-совместимый endpoint; `stream:true` — один
+      финальный чанк и `[DONE]` (честно, не «почти поток»).
+- [x] Только `127.0.0.1`; без токена — только localhost, с `--token` — Bearer/`?token=`;
+      в HTTP-режиме **команды не выполняются**.
+- [x] 7 тестов (`serve_test.go`): чат, OpenAI-формат, SSE-чанк, отказ не-loopback без
+      токена, обязательность токена, запрет диагностики на L0.
+- [ ] Дальше: сохранение HTTP-сессии в `Data/sessions-fast/`, выбор провайдера в UI.
 
 ## ЭТАП 10 (план): декларативные инструменты и MCP
 - [ ] `read_file` / `grep_search` / `file_glob_search` (L1), `write_file` (L2+подтверждение).

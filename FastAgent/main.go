@@ -914,6 +914,10 @@ func main() {
 		"самопроверка политики доступа: вердикты по уровням для набора команд (команды НЕ выполняются)")
 	selfTestFlag := flag.Bool("selftest", false,
 		"самопроверка пути выполнения: попытки команд через политику+подтверждение (выполняется только чтение)")
+	serveFlag := flag.Bool("serve", false,
+		"запустить встроенный HTTP-сервер с Web UI (этап 9; команды в этом режиме не выполняются)")
+	portFlag := flag.Int("port", 8888, "порт встроенного сервера (--serve)")
+	tokenFlag := flag.String("token", "", "токен доступа к встроенному серверу (без него — только localhost)")
 	flag.Parse()
 
 	initPaths()
@@ -934,6 +938,11 @@ func main() {
 		cfg.AccessLevel = *levelFlag
 	}
 	currentLevel = cfg.AccessLevel
+
+	if *serveFlag {
+		runServe(cfg, currentLevel, *portFlag, *tokenFlag)
+		return
+	}
 
 	reader := bufio.NewReader(os.Stdin)
 

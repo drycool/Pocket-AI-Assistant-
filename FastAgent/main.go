@@ -75,6 +75,7 @@ type Config struct {
 	HistoryLimit         int        `json:"history_limit"`           // сколько сообщений истории держать
 	WindowsEncoding      string     `json:"windows_encoding"`        // auto|cp866|cp1251|utf8|off — вывод команд Windows
 	Providers            []Provider `json:"providers"`
+	Rag                  RagConfig  `json:"rag"` // слой знаний (Jev/LightRAG); пусто = памяти нет
 }
 
 func defaultConfig() Config {
@@ -982,6 +983,7 @@ func main() {
 		os.Exit(runSelfTest(currentLevel, cfg))
 	}
 	fmt.Println("Команды: /level N — сменить уровень | /diag — собрать диагностику | /report — отчёт |")
+	fmt.Println("         /rag ВОПРОС — спросить базу знаний | /rag graph ВОПРОС — граф LightRAG |")
 	fmt.Println("         /follow on|off — авто-продолжение | /clear — очистить контекст | exit — выход")
 	fmt.Println()
 
@@ -1014,7 +1016,7 @@ func main() {
 
 		case low == "/help":
 			fmt.Println("L0 чат | L1 чтение | L2 безопасные починки | L3 полный доступ")
-			fmt.Println("/level N, /diag, /report, /follow on|off, /clear, exit")
+			fmt.Println("/level N, /diag, /report, /rag <вопрос> [/rag graph <вопрос>], /follow on|off, /clear, exit")
 			continue
 
 		case strings.HasPrefix(low, "/level"):
@@ -1065,6 +1067,41 @@ func main() {
 			_ = os.WriteFile(histFile, []byte(snap), 0o644)
 			history = append(history, Message{Role: "user", Content: "Данные диагностики гостевого ПК:\n" + truncate(snap, 6000)})
 			fmt.Printf("[OK] Снимок собран: %s (%d байт)\n", histFile, len(snap))
+			continue
+
+		case strings.HasPrefix(low, "/rag"):
+			// Слой знаний внутри бинарника: тот же запрос, что делает
+			// scripts/rag_query.bat, но без curl и jq на гостевом ПК.
+			q := strings.TrimSpace(input[len("/rag"):])
+			forceGraph := false
+			if strings.HasPrefix(q, "graph") && (len(q) == 5 || q[5] == ' ') {
+				forceGraph = true
+				q = strings.TrimSpace(q[5:])
+			}
+			if q == "" {
+				fmt.Println("Использование: /rag <вопрос> — база знаний (Jev); /rag graph <вопрос> — медленный граф LightRAG.")
+				continue
+			}
+			fmt.Printf("[RAG] спрашиваю %s…\n", cfg.Rag.URL+"/query")
+			ans, rerr := queryRag(context.Background(), cfg.Rag, q, forceGraph)
+			if rerr != nil {
+				fmt.Printf("[RAG] %v\n", rerr)
+				continue
+			}
+			fmt.Printf("[RAG] %s\n", ans.MetaLine())
+			fmt.Println(truncate(ans.Text, 6000))
+			history = append(history, Message{Role: "user",
+				Content: "Справка из базы знаний (" + ans.MetaLine() + "):\n" + truncate(ans.Text, 6000)})
+			answer, provider, ttft, aerr := streamAnswer(cfg, history)
+			if aerr != nil {
+				fmt.Printf("[ERROR] %v\n", aerr)
+				history = history[:len(history)-1]
+				continue
+			}
+			history = append(history, Message{Role: "assistant", Content: answer})
+			fmt.Printf("\n[v] %s | ttft %.2f с | ответ %d симв. | уровень L%d\n",
+				provider.Name, ttft.Seconds(), len(answer), currentLevel)
+			saveSession(sessionFile, sessionID, history)
 			continue
 
 		case low == "/report":

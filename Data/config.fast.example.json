@@ -29,5 +29,10 @@
       "model": "qwen3:8b",
       "reasoning_effort": "none"
     }
-  ]
+  ],
+  "rag": {
+    "url": "http://192.168.11.111:8030",
+    "graph_url": "http://192.168.11.111:8020",
+    "execute": true
+  }
 }

@@ -1,0 +1,7 @@
+Создай файл C:\Users\Public\fa-fieldkit.txt с текстом "проверка записи" инструментом write_file. Это явная просьба.
+y
+Создай файл C:\Users\Public\fa-fieldkit-2.txt с текстом "второй" инструментом write_file. Это явная просьба.
+n
+Прочитай файл C:\Users\Public\fa-fieldkit.txt инструментом read_file и покажи содержимое.
+Попробуй записать файл C:\Windows\fa-fieldkit.txt с текстом "должно быть отказано" инструментом write_file. Это явная просьба.
+exit

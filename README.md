@@ -33,24 +33,42 @@ admin-stick/
 │   ├── main.go         # Исходный код Go-агента (REST API, сборщик, контроллер)
 │   ├── agent.py        # Python-резерв (fallback при отсутствии agent.exe)
 │   └── agent.exe       # Скомпилированный бинарник (GOOS=windows GOARCH=amd64)
+├── FastAgent/          # Быстрый агент (ветка feature/deepseek-fast-agent)
+│   ├── main.go         # поток, уровни L0–L3, политика, журнал, RAG, --serve
+│   ├── tools.go        # декларативные инструменты (read_file/grep/glob/write_file)
+│   ├── mcp.go          # MCP-клиент stdio (JSON-RPC 2.0), только L3
+│   ├── *_test.go       # 98 юнит-проверок (политика, кодировки, инструменты, MCP…)
+│   ├── fastagent.exe   # сборка windows/amd64 (в git НЕ хранится, *.exe в .gitignore)
+│   ├── fastagent       # сборка linux/arm64 (для Pi5, тоже в .gitignore)
+│   ├── README.md       # подробная документация FastAgent
+│   └── FIELD-TEST.md   # чек-лист полевого теста и история прогонов
+├── FieldKit/           # готовый комплект для тестирования (см. scripts/make-fieldkit.sh)
 ├── Data/               # Рабочая директория (создается автоматически)
 │   ├── config.json     # Приоритетный список LLM-провайдеров (в .gitignore)
-│   ├── config.example.json  # Образец конфигурации (DeepSeek/Groq/OpenRouter/Ollama)
+│   ├── config.example.json     # Образец для классического агента
+│   ├── config.fast.example.json # Образец для FastAgent (без ключа)
+│   ├── config.fast.json         # Рабочий конфиг FastAgent с ключом (в .gitignore!)
 │   ├── firefox/        # Изолированный профиль Firefox (нулевой след)
 │   ├── sessions/       # История диалогов и дампы сессий (*.json)
-│   ├── logs/           # Сырые дампы диагностики (sysinfo_*.txt)
+│   ├── sessions-fast/  # Сессии FastAgent
+│   ├── logs/           # Дампы диагностики, журнал действий (actions_*.log), полевые прогоны
 │   ├── reports/        # Итоговые Markdown-отчеты (REPORT_*.md)
 │   └── downloads/      # Загрузки из браузера
+├── tests/              # Входные файлы полевых сессий (field-L0.txt … field-L2-tools.txt)
 ├── Tools/
 │   └── FirefoxPortable/  # Портативный браузер (firefox.exe)
 ├── bin/
 │   ├── agent.bat       # Быстрый запуск агента из командной строки
 │   └── ff-portable.bat # Запуск Firefox с изолированным профилем
 ├── scripts/
-│   └── install-firefox.bat  # Bootstrap установки Portable Firefox
+│   ├── build-fast-agent.sh      # сборка FastAgent (windows/amd64 + linux/arm64)
+│   ├── make-fieldkit.sh         # сборка комплекта FieldKit/
+│   ├── field-test-fastagent.bat # полевой тест: 8 сессий + самопроверки + -ask
+│   └── install-firefox.bat      # Bootstrap установки Portable Firefox
 ├── run-firefox.bat     # Быстрый запуск браузера
 ├── run-agent.bat       # Быстрый запуск агента
 ├── START.bat           # Главный интерактивный пульт управления (Control Center)
+├── RUN-FIELD-TEST.txt  # Пошаговая инструкция полевого теста FastAgent
 ├── .gitignore
 ├── LICENSE
 └── ROADMAP.md          # История и этапы разработки
@@ -62,14 +80,15 @@ admin-stick/
 
 ### Требования
 
-- **ОС:** Windows 7 / 8.1 / 10 / 11 / Server 2012+ (x64)
+- **ОС:** Windows 7 / 8.1 / 10 / 11 / Server 2012+ (x64). FastAgent дополнительно собирается
+  под Linux/arm64 (отладка и полевые прогоны на Raspberry Pi5) и Linux/amd64.
 - **Сеть:** доступ к выбранному LLM-провайдеру (HTTPS / 443). Примеры эндпоинтов:
   - `Gemini` — `generativelanguage.googleapis.com`
   - `DeepSeek` — `api.deepseek.com`
   - `Groq` — `api.groq.com`
   - `OpenRouter` — `openrouter.ai`
   - `Local-Ollama` — любой хост в Tailscale/LAN (без внешнего интернета)
-- **API-ключи:** чтобы включить fallback и дешёвые платные провайдеры, заполните список `providers` в `Data/config.json`.
+- **API-ключи:** чтобы включить fallback и дешёвые платные провайдеры, заполните список `providers` в `Data/config.json` (классический агент) или `Data/config.fast.json` (FastAgent).
 
 ### Приоритетный список провайдеров (`Data/config.json`)
 
@@ -174,6 +193,46 @@ admin-stick/
 - Для пробуждения gpu2 по WoL нужны: включённый Wake-on-LAN в BIOS/UEFI gpu2 и в настройках сетевой карты (Linux: `ethtool -s eth0 wol g`), питание gpu2 в режиме S5 (выключен, но под напряжением), Pi в той же LAN-сети.
 - Если `gpu2` выключен и Pi-шлюз не установлен — агент покажет ошибку «все провайдеры недоступны».
 
+### FastAgent: быстрый агент и комплект для тестирования
+
+`FastAgent` — отдельный бинарник (ветка `feature/deepseek-fast-agent`): облачный DeepSeek
+первым провайдером, локальная Ollama резервом, уровни доступа **L0–L3**, декларативные
+инструменты и MCP-клиент. Подробно — [FastAgent/README.md](FastAgent/README.md).
+
+**Запуск с флешки** — `START.bat`:
+
+- **[6]** — интерактивно, живая работа (`/level`, `/diag`, `/report`, `/rag`, `/follow`);
+- **[7]** — полевой тест: 8 сессий (`field-L0.txt` … `field-L2-tools.txt`) + самопроверки
+  `-policycheck`/`-selftest` + неинтерактивные `-ask`; всё складывается в один
+  `Data/logs/field-test-<штамп>.txt` и печатается на экран.
+
+**Комплект для тестирования** — папка `FieldKit/` (собирается на Pi одной командой):
+
+```bash
+bash scripts/make-fieldkit.sh     # -> FieldKit/ с бинарниками, тестами и документацией
+```
+
+Внутри: `fastagent.exe` (windows/amd64), `fastagent-linux-arm64` (Pi5), образец конфига
+`config.fast.example.json` **без ключа**, `README-FIRST.txt` (порядок действий), полный
+README и `RUN-FIELD-TEST.txt`, тесты и прогонщик, `SHA256SUMS.txt`. Ключ DeepSeek не
+копируется: на гостевом ПК конфиг уже лежит в `Data/config.fast.json` (он в `.gitignore`
+и на флешке в рабочем виде).
+
+**Самопроверки на месте** (ничего не меняют, кроме журнала):
+
+```bash
+fastagent.exe -policycheck                 # вердикты политики: 26/26 OK
+fastagent.exe -level 2 -selftest           # путь политика→подтверждение→журнал: 6/6 OK
+fastagent.exe -level 1 -ask "Прочитай C:\Windows\win.ini инструментом read_file"
+```
+
+**Что прислать после теста**: `Data\logs\field-test-*.txt` (сводный), стенограммы
+`field-L*-*.txt`, `field-ask-*.txt`, `field-policy-*.txt`, `field-selftest-*.txt` и
+`actions_*.log`. Полный список ожиданий — [RUN-FIELD-TEST.txt](RUN-FIELD-TEST.txt).
+
+Границы: в `--serve` инструменты и команды не выполняются (HTTP-режим только для диалога);
+в `-ask` подтверждений нет, поэтому `write_file` и MCP там честно отклоняются.
+
 ### Запуск с флешки
 
 1. Вставьте USB-накопитель в целевой ПК.
@@ -192,11 +251,23 @@ admin-stick/
 | `/report` | Анализ всей сессии и формирование итогового отчета в `Data/reports/` |
 | `exit` / `quit` | Сохранение истории сессии и корректное завершение работы |
 
+Команды FastAgent (пункт **[6]** в `START.bat`):
+
+| Команда | Описание |
+|---------|----------|
+| `/level N` | Сменить уровень L0–L3; повышение требует ввода `yes` |
+| `/diag` | Снимок системы (L1+) и передача его модели |
+| `/report` | Итоговый Markdown-отчёт в `Data/reports/REPORT_FAST_*.md` |
+| `/rag ВОПРОС` | Слой знаний Jev (быстрый путь); `/rag graph ВОПРОС` — медленный граф LightRAG |
+| `/follow on\|off` | Авто-продолжение после вывода команды |
+| `/clear` | Очистить контекст |
+| `exit` | Сохранить сессию в `Data/sessions-fast/` и выйти |
+
 ---
 
 ## Сборка из исходников
 
-Компиляция под Windows (например, из-под Linux/macOS или другой машины разработки):
+Компиляция классического агента под Windows (например, из-под Linux/macOS или другой машины разработки):
 
 ```bash
 cd Agent
@@ -204,6 +275,23 @@ GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o agent.exe main.go
 ```
 
 При успешной сборке размер `agent.exe` составит ~7.5 МБ.
+
+FastAgent (windows/amd64 + linux/arm64 для Pi5) и комплект для теста:
+
+```bash
+bash scripts/build-fast-agent.sh fast   # FastAgent/fastagent.exe + /tmp/fastagent-linux
+bash scripts/make-fieldkit.sh           # FieldKit/ с бинарниками, тестами, документацией
+cd FastAgent && go test ./...           # 98 проверок; go vet ./... — отдельно
+```
+
+Требования к сборке FastAgent: Go ≥ 1.21 (на Pi5 — go1.22.5 linux/arm64).
+Кросс-компиляция из `FastAgent/` вручную:
+
+```bash
+cd FastAgent
+GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o fastagent.exe .
+GOOS=linux   GOARCH=arm64 go build -o fastagent .
+```
 
 ---
 
@@ -240,21 +328,31 @@ GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o agent.exe main.go
 В репозиторий включен `.gitignore`, предотвращающий случайную публикацию персональных данных и API-ключей:
 
 ```gitignore
-# Конфигурации и ключи
+# Конфигурации и ключи (рабочие, с ключами)
 Data/config.json
+Data/config.public.json
+Data/config.fast.json
 
-# Данные сессий и дампы систем
+# Данные сессий, снимки, журналы действий, отчёты
 Data/sessions/*.json
+Data/sessions-fast/*.json
 Data/logs/*.txt
+Data/logs/actions_*.log
+Data/logs/field-*.txt
 Data/reports/*.md
 
 # Исполняемые файлы и артефакты Python
 *.exe
+FastAgent/fastagent
 *.pyc
 __pycache__/
 ```
 
-> Примечание: бинарники (`agent.exe`) исключены из версионного контроля. Для готового «портативного комплекта» соберите `agent.exe` локально (см. раздел «Сборка») или возьмите из релиза.
+> **Ключи.** `Data/config.fast.json` с API-ключом DeepSeek в git не попадает. Образец без
+> ключа — `Data/config.fast.example.json`. В `FieldKit/` ключи тоже не копируются.
+>
+> **Бинарники.** `agent.exe` и `fastagent.exe`/`fastagent` исключены из версионного
+> контроля: соберите локально (раздел «Сборка») или возьмите готовые из `FieldKit/`.
 
 ---
 

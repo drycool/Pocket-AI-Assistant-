@@ -178,6 +178,45 @@ MCP-серверы подключаются в конфиге (запускаю�
 
 **В HTTP-режиме (`--serve`) инструменты не выполняются** — граница этапа 9 не меняется.
 
+## Удалённая диагностика (этап R1): гость звонит сам, ключи остаются у оператора
+
+Сценарий — `../REMOTE-DIAG.md`. Коротко: на проблемный ПК попадает **один** бинарь, он сам
+звонит на брокер (pi5, Tailscale Funnel), а оператор работает в своём терминале. AnyDesk нужен
+только перетащить файл и запустить его. Три процесса — три режима одного бинаря:
+
+```bash
+# 1) на pi5: брокер (реле, ключа подписи не знает)
+fastagent -broker -broker-addr 127.0.0.1:8866           -broker-secret <секрет> -ticket-exe FastAgent/fastagent.exe
+
+# 2) на pi5: оператор — создаёт сессию, получает код и файл-билет
+fastagent -remote new -broker-url https://pi5.tail823290.ts.net/fa -broker-secret <секрет>
+#    Файл-билет: ~/.cache/fastagent/fastagent-<код>.exe  (перетащить в AnyDesk)
+#    Одна команда без REPL: -remote-cmd "read C:\Windows\win.ini"
+
+# 3) на госте: двойной щёлчок по fastagent-<код>.exe (он и есть -link);
+#    если имя переименовали — fastagent.exe -link и ввести код
+```
+
+Что можно в R1 — **только чтение**: `diag`, `read`, `grep`, `glob`. Консоль оператора понимает
+эти же глаголы (`read <путь>`, `grep <шаблон> [каталог] [glob]`, `glob <шаблон> [каталог]`,
+`help`, `quit`). `run` и `write_file` в R1 не существуют — их нет ни в консоли, ни у гостя:
+`remoteExec` пропускает команду только через `classifyTool(kind, L1Read)`, остальное отклоняет
+и пишет в журнал.
+
+Почему это не «дыра в HTTP-запрете» (граница этапа 9 держится):
+
+- **ключа модели на госте нет** — модель и Jev работают у оператора, гость возвращает только
+  результат; брокер — реле, команды подписаны `HMAC-SHA256` сессионным ключом из кода и
+  guest-токена, поэтому даже скомпрометированный брокер не подделает команду;
+- **политика на госте своя**: вердикт считает `classifyTool`, отказ при несовпадении подписи
+  тоже на госте (`[link] ОТКАЗ: подпись команды … не сходится`);
+- сессия 2 ч, окно пары 15 мин, простой 15 мин, токен только в памяти, автозапуска и службы нет;
+- журнал гостя — отдельный файл `Data/logs/actions_remote_<дата>.log` с `provenance=remote`.
+
+Живой прогон 18.11.2026 (pi5): `diag` → 0.07 с, `read /etc/hostname` → `1: pi5`;
+`GET /fa/ticket/<код>.exe` отдал бинарь 9 000 174 Б с именем `<код>` в `Content-Disposition`;
+в журнале гостя `link-start`, `diag`, `tool:read_file` — все `approved=true`, `verdict=чтение`.
+
 ## Комплект для тестирования (FieldKit)
 
 Папка `FieldKit/` на флешке — то, что нужно взять на гостевой ПК и что удобно
@@ -192,7 +231,8 @@ bash scripts/make-fieldkit.sh            # -> FieldKit/ (или FieldKit-YYYYMMD
 | Файл | Зачем |
 |---|---|
 | `fastagent.exe` | windows/amd64, собран из текущего HEAD |
-| `fastagent-linux-arm64` | отладка на Pi5 (aarch64) |
+| `fastagent-linux-arm64` | отладка на Pi5 (aarch64), брокер R1 |
+| `fastagent-linux-amd64` | оффлайн-путь: загрузочная Ubuntu на x86_64 |
 | `config.fast.example.json` | образец конфига: скопировать в `Data\config.fast.json` и вписать ключ |
 | `README-FIRST.txt` | порядок действий и что прислать после теста |
 | `README.md`, `FastAgent-README.md` | полная документация |
@@ -205,8 +245,8 @@ bash scripts/make-fieldkit.sh            # -> FieldKit/ (или FieldKit-YYYYMMD
 ## Сборка и тесты
 
 ```bash
-bash scripts/build-fast-agent.sh fast     # linux/arm64 (отладка) + windows/amd64 (FastAgent/fastagent.exe)
-cd FastAgent && go test ./...             # юнит-тесты: 98 проверок (политика, кодировки, вывод, RAG, сервер, инструменты, MCP, самопроверки)
+bash scripts/build-fast-agent.sh fast     # linux/arm64 + linux/amd64 + windows/amd64 (FastAgent/fastagent.exe)
+cd FastAgent && go test ./...             # юнит-тесты: 105 проверок (политика, кодировки, вывод, RAG, сервер, инструменты, MCP, удалённая диагностика, самопроверки)
 ```
 
 ## Результаты физической проверки (сен 2026, Pi5 + gpu2 + DeepSeek)

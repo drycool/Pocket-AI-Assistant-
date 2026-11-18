@@ -7,11 +7,13 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET="${1:-fast}"
 
 build_fast() {
-  echo "[*] FastAgent: linux/arm64 (для отладки на Pi)"
-  (cd "$ROOT/FastAgent" && GOOS=linux GOARCH=arm64 go build -o /tmp/fastagent-linux .)
+  echo "[*] FastAgent: linux/arm64 -> FastAgent/fastagent (отладка на Pi, R1-брокер)"
+  (cd "$ROOT/FastAgent" && GOOS=linux GOARCH=arm64 go build -o fastagent .)
   echo "[*] FastAgent: windows/amd64 -> FastAgent/fastagent.exe"
   (cd "$ROOT/FastAgent" && GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o fastagent.exe .)
-  ls -la "$ROOT/FastAgent/fastagent.exe"
+  echo "[*] FastAgent: linux/amd64 -> FastAgent/fastagent-linux-amd64 (оффлайн-загрузка Ubuntu, REMOTE-DIAG §8)"
+  (cd "$ROOT/FastAgent" && GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o fastagent-linux-amd64 .)
+  ls -la "$ROOT/FastAgent/fastagent" "$ROOT/FastAgent/fastagent.exe" "$ROOT/FastAgent/fastagent-linux-amd64"
 }
 
 build_agent() {

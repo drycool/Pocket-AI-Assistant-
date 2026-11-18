@@ -281,7 +281,7 @@ FastAgent (windows/amd64 + linux/arm64 для Pi5) и комплект для т
 ```bash
 bash scripts/build-fast-agent.sh fast   # FastAgent/fastagent.exe + /tmp/fastagent-linux
 bash scripts/make-fieldkit.sh           # FieldKit/ с бинарниками, тестами, документацией
-cd FastAgent && go test ./...           # 98 проверок; go vet ./... — отдельно
+cd FastAgent && go test ./...           # 105 проверок; go vet ./... — отдельно
 ```
 
 Требования к сборке FastAgent: Go ≥ 1.21 (на Pi5 — go1.22.5 linux/arm64).

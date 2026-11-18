@@ -23,6 +23,7 @@ Data/firefox/cache/*
 # Исполняемые файлы и артефакты Python
 *.exe
 FastAgent/fastagent
+FastAgent/fastagent-linux-amd64
 *.pyc
 __pycache__/
 

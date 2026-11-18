@@ -64,19 +64,20 @@ type ThinkingOpt struct {
 }
 
 type Config struct {
-	AccessLevel          int        `json:"access_level"`            // 0..3
-	Stream               bool       `json:"stream"`                  // SSE-стриминг ответа
-	AutoFollowup         bool       `json:"auto_followup"`           // отдавать вывод команды модели
-	ShowReasoning        bool       `json:"show_reasoning"`          // печатать "размышления" модели
-	MaxTokens            int        `json:"max_tokens"`              // лимит ответа
-	Temperature          float64    `json:"temperature"`             // 0 = детерминированно
-	FirstTokenTimeoutSec int        `json:"first_token_timeout_sec"` // ожидание первого токена
-	TotalTimeoutSec      int        `json:"total_timeout_sec"`       // общий таймаут запроса
-	HistoryLimit         int        `json:"history_limit"`           // сколько сообщений истории держать
-	WindowsEncoding      string     `json:"windows_encoding"`        // auto|cp866|cp1251|utf8|off — вывод команд Windows
-	Providers            []Provider `json:"providers"`
-	Rag                  RagConfig  `json:"rag"` // слой знаний (Jev/LightRAG); пусто = памяти нет
-	MCP                  MCPConfig  `json:"mcp"` // внешние инструменты (этап 10); пусто = только встроенные
+	AccessLevel          int          `json:"access_level"`            // 0..3
+	Stream               bool         `json:"stream"`                  // SSE-стриминг ответа
+	AutoFollowup         bool         `json:"auto_followup"`           // отдавать вывод команды модели
+	ShowReasoning        bool         `json:"show_reasoning"`          // печатать "размышления" модели
+	MaxTokens            int          `json:"max_tokens"`              // лимит ответа
+	Temperature          float64      `json:"temperature"`             // 0 = детерминированно
+	FirstTokenTimeoutSec int          `json:"first_token_timeout_sec"` // ожидание первого токена
+	TotalTimeoutSec      int          `json:"total_timeout_sec"`       // общий таймаут запроса
+	HistoryLimit         int          `json:"history_limit"`           // сколько сообщений истории держать
+	WindowsEncoding      string       `json:"windows_encoding"`        // auto|cp866|cp1251|utf8|off — вывод команд Windows
+	Providers            []Provider   `json:"providers"`
+	Rag                  RagConfig    `json:"rag"`    // слой знаний (Jev/LightRAG); пусто = памяти нет
+	MCP                  MCPConfig    `json:"mcp"`    // внешние инструменты (этап 10); пусто = только встроенные
+	Remote               RemoteConfig `json:"remote"` // удалённая диагностика (этап R1); пусто = режим не настроен
 }
 
 func defaultConfig() Config {
@@ -1039,6 +1040,21 @@ func main() {
 	portFlag := flag.Int("port", 8888, "порт встроенного сервера (--serve)")
 	tokenFlag := flag.String("token", "", "токен доступа к встроенному серверу (без него — только localhost)")
 	askFlag := flag.String("ask", "", "задать один вопрос, выполнить инструменты и выйти (без REPL)")
+	brokerFlag := flag.Bool("broker", false,
+		"запустить брокер удалённой диагностики (этап R1: гость звонит сюда, оператор держит ключи)")
+	brokerAddr := flag.String("broker-addr", "127.0.0.1:8866", "адрес брокера host:port (--broker)")
+	brokerSecret := flag.String("broker-secret", "",
+		"секрет операторских ручек брокера (обязателен, если слушаем не localhost)")
+	ticketExe := flag.String("ticket-exe", "",
+		"exe, который брокер отдаёт файлом-билетом /fa/ticket/<код>.exe")
+	linkFlag := flag.Bool("link", false,
+		"гостевая сторона: подключиться к брокеру по коду из имени файла и исполнять только чтение")
+	brokerURLFlag := flag.String("broker-url", "",
+		"адрес брокера для -link/-remote (переопределяет remote.broker_url из конфига)")
+	remoteFlag := flag.String("remote", "",
+		"оператор: new — создать сессию, положить файл-билет и вести её из консоли")
+	remoteCmdFlag := flag.String("remote-cmd", "",
+		"оператор: одна команда для -remote new, без REPL (например, \"diag\")")
 	flag.Parse()
 
 	initPaths()
@@ -1060,6 +1076,27 @@ func main() {
 	}
 	currentLevel = cfg.AccessLevel
 
+	if *brokerFlag {
+		// Брокер — это реле: модель и ключи не нужны, конфиг тоже.
+		ensureUTF8Console()
+		os.Exit(runBroker(*brokerAddr, *brokerSecret, *ticketExe))
+	}
+	if *linkFlag {
+		// Гостевая сторона: код сессии в имени файла, наружу звоним сами.
+		ensureUTF8Console()
+		os.Exit(runLink(cfg, *brokerURLFlag))
+	}
+	if *remoteFlag != "" {
+		if strings.ToLower(strings.TrimSpace(*remoteFlag)) != "new" {
+			fmt.Println("[!] В R1 поддерживается только: -remote new (создать сессию).")
+			os.Exit(2)
+		}
+		ensureUTF8Console()
+		if *ticketExe != "" {
+			cfg.Remote.TicketExe = *ticketExe // тот же флаг, что у брокера: один путь, без правки конфига
+		}
+		os.Exit(runRemote(cfg, *brokerURLFlag, *brokerSecret, *remoteCmdFlag))
+	}
 	if *serveFlag {
 		// В HTTP-режиме инструменты выключены: команды и запись файлов по HTTP
 		// не выполняются (решение этапа 9, оно не меняется этапом 10).

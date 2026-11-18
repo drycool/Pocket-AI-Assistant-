@@ -29,7 +29,8 @@ mkdir -p "$KIT/tests" "$KIT/scripts"
 # --- бинарники ---
 cp -f "$FA/fastagent.exe" "$KIT/fastagent.exe"
 [[ -f "$FA/fastagent" ]] && cp -f "$FA/fastagent" "$KIT/fastagent-linux-arm64"
-echo "[+] fastagent.exe + fastagent-linux-arm64"
+[[ -f "$FA/fastagent-linux-amd64" ]] && cp -f "$FA/fastagent-linux-amd64" "$KIT/fastagent-linux-amd64"
+echo "[+] fastagent.exe + fastagent-linux-arm64 + fastagent-linux-amd64"
 
 # --- конфиг-образец (без ключа) ---
 cp -f "$ROOT/Data/config.fast.example.json" "$KIT/config.fast.example.json"
@@ -90,6 +91,7 @@ RUN-FIELD-TEST.txt (этот комплект) и FIELD-TEST.md (полный ч
 ------
 fastagent.exe                 windows/amd64 — главный бинарник
 fastagent-linux-arm64         отладка на Pi5 (aarch64), не обязателен на Windows
+fastagent-linux-amd64         оффлайн-путь: загрузочная Ubuntu на x86_64 (REMOTE-DIAG §8)
 config.fast.example.json      образец: скопировать в Data\config.fast.json + ключ
 tests/                        входные файлы 8 полевых сессий
 scripts/field-test-fastagent.bat  прогонщик (из корня флешки — START.bat [7])
@@ -104,6 +106,7 @@ echo "[+] README-FIRST.txt"
             FIELD-TEST.md RUN-FIELD-TEST.txt README-FIRST.txt tests/*.txt \
             scripts/field-test-fastagent.bat > SHA256SUMS.txt 2>/dev/null || true
   [[ -f fastagent-linux-arm64 ]] && sha256sum fastagent-linux-arm64 >> SHA256SUMS.txt
+  [[ -f fastagent-linux-amd64 ]] && sha256sum fastagent-linux-amd64 >> SHA256SUMS.txt
 )
 echo "[+] SHA256SUMS.txt"
 

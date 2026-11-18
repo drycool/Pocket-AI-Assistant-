@@ -44,6 +44,11 @@ cp -f "$ROOT/RUN-FIELD-TEST.txt"           "$KIT/RUN-FIELD-TEST.txt"
 cp -f "$ROOT/RUN-REMOTE-TEST.txt"          "$KIT/RUN-REMOTE-TEST.txt"
 echo "[+] README.md, FastAgent-README.md, FIELD-TEST.md, RUN-FIELD-TEST.txt, RUN-REMOTE-TEST.txt"
 
+# --- сценарии оператора (R5) ---
+mkdir -p "$KIT/scenarios"
+cp -f "$ROOT"/scenarios/*.json "$KIT/scenarios/"
+echo "[+] scenarios/ ($(ls "$KIT"/scenarios/*.json | wc -l) файла, включая manifest.json)"
+
 # --- тесты и прогонщик ---
 cp -f "$ROOT"/tests/field-*.txt "$KIT/tests/"
 cp -f "$ROOT/scripts/field-test-fastagent.bat" "$KIT/scripts/field-test-fastagent.bat"
@@ -86,7 +91,9 @@ cat > "$KIT/README-FIRST.txt" <<EOF
 ПОДРОБНО
 --------
 RUN-FIELD-TEST.txt (полевой тест на Windows) и FIELD-TEST.md (полный чек-лист).
-Удалённая диагностика R1–R4: RUN-REMOTE-TEST.txt (гость звонит на брокер pi5).
+Удалённая диагностика R5: RUN-REMOTE-TEST.txt — памятка оператора (меню:
+старт/диагностика/починки/отчёт), сценарии в scenarios\*.json, эталон в
+scenarios\manifest.json. Гость звонит на брокер pi5 сам.
 Разбор сессий: FastAgent-README.md.
 
 СОСТАВ
@@ -106,6 +113,7 @@ echo "[+] README-FIRST.txt"
   cd "$KIT"
   sha256sum fastagent.exe config.fast.example.json README.md FastAgent-README.md \
             FIELD-TEST.md RUN-FIELD-TEST.txt RUN-REMOTE-TEST.txt README-FIRST.txt tests/*.txt \
+            scenarios/*.json \
             scripts/field-test-fastagent.bat > SHA256SUMS.txt 2>/dev/null || true
   [[ -f fastagent-linux-arm64 ]] && sha256sum fastagent-linux-arm64 >> SHA256SUMS.txt
   [[ -f fastagent-linux-amd64 ]] && sha256sum fastagent-linux-amd64 >> SHA256SUMS.txt

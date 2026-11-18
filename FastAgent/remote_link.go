@@ -84,12 +84,13 @@ func runLink(cfg Config, brokerURL string) int {
 		fmt.Println("[i] Удалённый режим: уровень L2 — L3 удалённо не разрешён.")
 	}
 	fmt.Println("===================================================")
-	fmt.Println("        FASTAGENT — гость удалённой диагностики (R1–R4)")
+	fmt.Println("  FASTAGENT — диагностика компьютера")
 	fmt.Println("===================================================")
-	fmt.Printf("Сессия: %s | брокер: %s\n", code, base)
-	fmt.Println("[i] Связь установлена. Жду команды оператора: чтение всегда,")
-	fmt.Println("    run и запись файла — только после подтверждения у оператора.")
-	fmt.Println("    Ctrl+C — выйти.")
+	fmt.Println("  [OK] Связь с оператором установлена.")
+	fmt.Println("  Оператор видит этот компьютер. Чтение — без вопросов,")
+	fmt.Println("  изменения — только после его подтверждения.")
+	fmt.Println("  Это окно не закрывайте: в конце оно попрощается само.")
+	fmt.Printf("  Сессия: %s\n", code)
 	logRemoteAction("link-start", VReadOnly, true, "code="+code)
 
 	backoff := time.Second
@@ -97,10 +98,11 @@ func runLink(cfg Config, brokerURL string) int {
 		cmd, perr := linkPoll(base, guest)
 		if perr != nil {
 			if errors.Is(perr, errRemoteClosed) {
-				fmt.Println("[link] оператор закрыл сессию — выхожу.")
+				fmt.Println()
+				fmt.Println("  Готово. Оператор завершил сессию — закройте это окно.")
 				return 0
 			}
-			fmt.Printf("[link] связь: %v (повтор через %s)\n", perr, backoff)
+			fmt.Printf("  Связь прервалась, переподключаюсь через %s…\n", backoff)
 			time.Sleep(backoff)
 			if backoff < 10*time.Second {
 				backoff *= 2
@@ -563,7 +565,11 @@ func linkJournal(args map[string]any) (string, int) {
 	}
 	path := remoteLogPath()
 	var b strings.Builder
-	fmt.Fprintf(&b, "host=%s\npath=%s\n", hostname(), path)
+	size := int64(0)
+	if fi, statErr := os.Stat(path); statErr == nil {
+		size = fi.Size()
+	}
+	fmt.Fprintf(&b, "host=%s\npath=%s\nsize=%d\n", hostname(), path, size)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		fmt.Fprintf(&b, "журнал недоступен: %v\n", err)

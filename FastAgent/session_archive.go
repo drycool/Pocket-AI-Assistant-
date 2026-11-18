@@ -342,6 +342,13 @@ func saveArchive(a *sessionArchive, note string) bool {
 	if a == nil {
 		return false
 	}
+	// R5: контроль секретов ДО записи в общую память. Архив — это txt на диск
+	// оператора, а уроки уходят в корпус, который читают все агенты; поэтому
+	// при находке txt пишем (разбор нужен человеку), а в память — нет.
+	findings := scanSecretsText("архив", []byte(a.Text()), configuredSecretRefs(sessionCfg))
+	if strings.TrimSpace(archiveMemoryDir) != "" {
+		findings = append(findings, scanSecretsText("уроки", []byte(a.Lessons(note)), configuredSecretRefs(sessionCfg))...)
+	}
 	txt, err := a.WriteText(logsDir)
 	if err != nil {
 		fmt.Printf("[!] архив не записан: %v\n", err)
@@ -351,6 +358,15 @@ func saveArchive(a *sessionArchive, note string) bool {
 	a.lastNote = note
 	a.Note("/save", "архив записан: "+txt)
 	fmt.Printf("[OK] архив сессии: %s\n", txt)
+	if len(findings) > 0 {
+		fmt.Println("[!] ОПАСНО: в архиве найдены секреты — в память не пишем:")
+		for _, f := range findings {
+			fmt.Println("    " + f)
+		}
+		fmt.Println("    Уберите секреты из вывода и повторите отчёт.")
+		return true
+	}
+	fmt.Println("[OK] секретов в архиве и уроках не найдено.")
 
 	if strings.TrimSpace(archiveMemoryDir) == "" {
 		fmt.Println("[i] Уроки в память не пишутся: каталог памяти не задан (-memory-dir).")

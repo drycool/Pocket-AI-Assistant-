@@ -1,0 +1,266 @@
+{
+  "name": "standard-windows",
+  "title": "Стандартная диагностика Windows",
+  "checks": [
+    {
+      "id": "os",
+      "title": "Система и время загрузки",
+      "priority": 3,
+      "timeout_sec": 90,
+      "commands": [
+        "systeminfo"
+      ],
+      "rules": []
+    },
+    {
+      "id": "disk",
+      "title": "Диски: размер и свободное место",
+      "priority": 2,
+      "timeout_sec": 60,
+      "commands": [
+        "wmic logicaldisk get caption,size,freespace"
+      ],
+      "rules": []
+    },
+    {
+      "id": "disk_low",
+      "title": "Мало места на дисках",
+      "priority": 1,
+      "timeout_sec": 60,
+      "commands": [
+        "powershell -NoProfile -Command \"Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' | Where-Object { $_.FreeSpace / $_.Size -lt 0.1 } | ForEach-Object { 'LOW SPACE: ' + $_.DeviceID } \""
+      ],
+      "rules": [
+        {
+          "regex": "LOW SPACE: [A-Z]:",
+          "problem_if": "found",
+          "message": "диск с запасом меньше 10 %: {n}",
+          "ok_message": "запаса на дисках достаточно"
+        }
+      ]
+    },
+    {
+      "id": "large_files",
+      "title": "Крупные файлы в профиле",
+      "priority": 3,
+      "timeout_sec": 180,
+      "commands": [
+        "powershell -NoProfile -Command \"Get-ChildItem $env:USERPROFILE\\Downloads,$env:USERPROFILE\\Documents,$env:USERPROFILE\\Desktop -Recurse -File -ErrorAction SilentlyContinue | Sort-Object Length -Descending | Select-Object -First 10 FullName,Length\""
+      ],
+      "rules": []
+    },
+    {
+      "id": "errors_system",
+      "title": "Критические ошибки в журнале System",
+      "priority": 1,
+      "timeout_sec": 120,
+      "commands": [
+        "wevtutil qe System /c:40 /rd:true /f:text /q:*[System[(Level=1 or Level=2)]]"
+      ],
+      "rules": [
+        {
+          "regex": "(?m)^\\s*Level:\\s*[12]\\b",
+          "problem_if": "found",
+          "message": "критических ошибок в System: {n}",
+          "ok_message": "критических ошибок в System нет"
+        }
+      ]
+    },
+    {
+      "id": "errors_app",
+      "title": "Критические ошибки в журнале Application",
+      "priority": 1,
+      "timeout_sec": 120,
+      "commands": [
+        "wevtutil qe Application /c:40 /rd:true /f:text /q:*[System[(Level=1 or Level=2)]]"
+      ],
+      "rules": [
+        {
+          "regex": "(?m)^\\s*Level:\\s*[12]\\b",
+          "problem_if": "found",
+          "message": "критических ошибок в Application: {n}",
+          "ok_message": "критических ошибок в Application нет"
+        }
+      ]
+    },
+    {
+      "id": "wer",
+      "title": "Отчёты о сбоях и дампы",
+      "priority": 2,
+      "timeout_sec": 60,
+      "ignore_exit": true,
+      "commands": [
+        "dir C:\\ProgramData\\Microsoft\\Windows\\WER\\ReportArchive /b",
+        "dir C:\\Windows\\Minidump /b"
+      ],
+      "rules": [
+        {
+          "regex": "(?i)\\.dmp\\s*$",
+          "problem_if": "found",
+          "message": "дампов сбоев: {n}",
+          "ok_message": "дампов сбоев нет"
+        }
+      ]
+    },
+    {
+      "id": "autostart",
+      "title": "Автозагрузка: подозрительные записи",
+      "priority": 2,
+      "timeout_sec": 90,
+      "commands": [
+        "reg query \"HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\"",
+        "reg query \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\"",
+        "powershell -NoProfile -Command \"Get-CimInstance Win32_StartupCommand | Select-Object Name,Command,Location\""
+      ],
+      "rules": [
+        {
+          "regex": "(?i)(\\\\Temp\\\\|mshta|wscript\\.exe|certutil[^\\n]*-url|powershell[^\\n]*-enc)",
+          "problem_if": "found",
+          "message": "подозрительных записей автозагрузки: {n}",
+          "ok_message": "подозрительных записей нет"
+        }
+      ]
+    },
+    {
+      "id": "services",
+      "title": "Службы с автозапуском не работают",
+      "priority": 2,
+      "timeout_sec": 90,
+      "commands": [
+        "powershell -NoProfile -Command \"Get-Service | Where-Object { $_.StartType -eq 'Automatic' -and $_.Status -ne 'Running' } | Select-Object Name,DisplayName,Status\""
+      ],
+      "rules": [
+        {
+          "regex": "(?m)\\bStopped\\b",
+          "problem_if": "found",
+          "message": "служб с автозапуском не работает: {n}",
+          "ok_message": "службы с автозапуском работают"
+        }
+      ]
+    },
+    {
+      "id": "processes",
+      "title": "Процессы: нагрузка и подозрительное",
+      "priority": 2,
+      "timeout_sec": 90,
+      "commands": [
+        "powershell -NoProfile -Command \"Get-Process | Sort-Object CPU -Descending | Select-Object -First 12 Name,Id,CPU,WS\""
+      ],
+      "rules": [
+        {
+          "regex": "(?i)(xmrig|minerd|nicehash|njrat|remcos|asyncrat)",
+          "problem_if": "found",
+          "message": "процессов, похожих на майнер/троян: {n}",
+          "ok_message": "подозрительных процессов нет"
+        }
+      ]
+    },
+    {
+      "id": "updates",
+      "title": "Последние обновления",
+      "priority": 3,
+      "timeout_sec": 90,
+      "commands": [
+        "powershell -NoProfile -Command \"Get-HotFix | Sort-Object InstalledOn -Descending | Select-Object -First 5 HotFixID,InstalledOn\""
+      ],
+      "rules": []
+    },
+    {
+      "id": "defender",
+      "title": "Защита Windows (Defender)",
+      "priority": 2,
+      "timeout_sec": 90,
+      "commands": [
+        "powershell -NoProfile -Command \"Get-MpComputerStatus | Select-Object AntivirusEnabled,RealTimeProtectionEnabled,AntivirusSignatureLastUpdated\""
+      ],
+      "rules": [
+        {
+          "regex": "RealTimeProtectionEnabled\\s*:\\s*False",
+          "problem_if": "found",
+          "message": "защита в реальном времени выключена"
+        },
+        {
+          "regex": "AntivirusEnabled\\s*:\\s*False",
+          "problem_if": "found",
+          "message": "антивирус выключен"
+        },
+        {
+          "regex": "AntivirusEnabled",
+          "problem_if": "absent",
+          "message": "нет данных Defender (возможно, сторонний антивирус)"
+        },
+        {
+          "regex": "^$",
+          "problem_if": "found",
+          "message": "пустой ответ Defender",
+          "ok_message": "защита включена"
+        }
+      ]
+    },
+    {
+      "id": "network",
+      "title": "Сеть: адаптеры и адреса",
+      "priority": 3,
+      "timeout_sec": 60,
+      "commands": [
+        "ipconfig /all"
+      ],
+      "rules": []
+    }
+  ],
+  "fixes": [
+    {
+      "id": "flushdns",
+      "title": "Сбросить кэш DNS",
+      "confirm": "Сбросить кэш DNS на компьютере клиента?",
+      "commands": [
+        "ipconfig /flushdns"
+      ]
+    },
+    {
+      "id": "winsock",
+      "title": "Сбросить стек TCP/IP (winsock)",
+      "confirm": "Сбросить winsock? Нужна перезагрузка, чтобы это подействовало.",
+      "needs_admin": true,
+      "commands": [
+        "netsh winsock reset"
+      ]
+    },
+    {
+      "id": "sfc",
+      "title": "Проверить системные файлы (sfc /scannow)",
+      "confirm": "Запустить sfc /scannow? Это 10–45 минут и требует прав администратора.",
+      "needs_admin": true,
+      "commands": [
+        "sfc /scannow"
+      ]
+    },
+    {
+      "id": "dism",
+      "title": "Восстановить образ Windows (DISM)",
+      "confirm": "Запустить DISM restorehealth? Это до 45 минут и требует прав администратора.",
+      "needs_admin": true,
+      "commands": [
+        "dism /online /cleanup-image /restorehealth"
+      ]
+    },
+    {
+      "id": "w32tm",
+      "title": "Синхронизировать время (w32tm)",
+      "confirm": "Синхронизировать время с сервером?",
+      "needs_admin": true,
+      "commands": [
+        "w32tm /resync"
+      ]
+    },
+    {
+      "id": "gpupdate",
+      "title": "Обновить групповые политики",
+      "confirm": "Обновить групповые политики?",
+      "needs_admin": true,
+      "commands": [
+        "gpupdate /force"
+      ]
+    }
+  ]
+}

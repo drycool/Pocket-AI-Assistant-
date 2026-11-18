@@ -14,6 +14,8 @@ build_fast() {
   echo "[*] FastAgent: linux/amd64 -> FastAgent/fastagent-linux-amd64 (оффлайн-загрузка Ubuntu, REMOTE-DIAG §8)"
   (cd "$ROOT/FastAgent" && GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o fastagent-linux-amd64 .)
   ls -la "$ROOT/FastAgent/fastagent" "$ROOT/FastAgent/fastagent.exe" "$ROOT/FastAgent/fastagent-linux-amd64"
+  # R5: эталон для стартового блока оператора (размер + sha256 файла клиента)
+  bash "$ROOT/scripts/write-scenario-manifest.sh"
 }
 
 build_agent() {

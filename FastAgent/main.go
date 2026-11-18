@@ -1129,6 +1129,10 @@ func main() {
 		"оператор: new — создать сессию, положить файл-билет и вести её из консоли")
 	remoteCmdFlag := flag.String("remote-cmd", "",
 		"оператор: одна команда для -remote new, без REPL (например, \"diag\")")
+	plainFlag := flag.Bool("plain", false,
+		"оператор: обычная консоль команд вместо меню R5")
+	scenarioFlag := flag.String("scenario", "",
+		"R5: сценарий из scenarios/ (по умолчанию standard-windows)")
 	memoryDirFlag := flag.String("memory-dir", os.Getenv("JEV_MEMORY_DIR"),
 		"R4: корпус памяти Jev для уроков сессии (по умолчанию JEV_MEMORY_DIR; пусто — только txt-архив)")
 	reindexFlag := flag.Bool("reindex", false,
@@ -1149,6 +1153,7 @@ func main() {
 		actionsLog = filepath.Join(logsDir, "actions_"+time.Now().Format("2006-01-02")+".log")
 	}
 	cfg = loadConfig()
+	sessionCfg = cfg
 	setEncodingMode(cfg.WindowsEncoding)
 	ensureUTF8Console()
 	if *levelFlag >= 0 && *levelFlag <= 3 {
@@ -1183,6 +1188,8 @@ func main() {
 		if *ticketExe != "" {
 			cfg.Remote.TicketExe = *ticketExe // тот же флаг, что у брокера: один путь, без правки конфига
 		}
+		operatorPlain = *plainFlag
+		operatorScenarioName = strings.TrimSpace(*scenarioFlag)
 		archiveMemoryDir = strings.TrimSpace(*memoryDirFlag)
 		archiveReindex = *reindexFlag
 		archiveJevDir = strings.TrimSpace(*jevDirFlag)

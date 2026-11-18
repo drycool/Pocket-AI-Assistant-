@@ -1,0 +1,110 @@
+{
+  "name": "standard-linux",
+  "title": "Стандартная диагностика Linux",
+  "checks": [
+    {
+      "id": "os",
+      "title": "Система и время работы",
+      "priority": 3,
+      "timeout_sec": 30,
+      "commands": [
+        "uname -a",
+        "uptime"
+      ],
+      "rules": []
+    },
+    {
+      "id": "disk",
+      "title": "Диски: свободное место",
+      "priority": 1,
+      "timeout_sec": 30,
+      "commands": [
+        "df -h"
+      ],
+      "rules": [
+        {
+          "regex": "(?m)\\s(9[5-9]|100)%\\s",
+          "problem_if": "found",
+          "message": "разделов почти без места: {n}",
+          "ok_message": "места на дисках достаточно"
+        }
+      ]
+    },
+    {
+      "id": "memory",
+      "title": "Память и swap",
+      "priority": 2,
+      "timeout_sec": 30,
+      "commands": [
+        "free -h"
+      ],
+      "rules": []
+    },
+    {
+      "id": "failed_units",
+      "title": "Неудачные службы systemd",
+      "priority": 1,
+      "timeout_sec": 30,
+      "commands": [
+        "systemctl status --failed"
+      ],
+      "rules": [
+        {
+          "regex": "(?m)loaded\\s+failed",
+          "problem_if": "found",
+          "message": "неудачных служб: {n}",
+          "ok_message": "неудачных служб нет"
+        }
+      ]
+    },
+    {
+      "id": "errors",
+      "title": "Ошибки в журнале (priority 3)",
+      "priority": 1,
+      "timeout_sec": 60,
+      "commands": [
+        "journalctl -p 3 -n 20 --no-pager"
+      ],
+      "rules": []
+    },
+    {
+      "id": "network",
+      "title": "Сеть: интерфейсы и маршруты",
+      "priority": 2,
+      "timeout_sec": 30,
+      "commands": [
+        "ip -br a",
+        "ip route"
+      ],
+      "rules": []
+    },
+    {
+      "id": "processes",
+      "title": "Процессы: нагрузка и подозрительное",
+      "priority": 2,
+      "timeout_sec": 30,
+      "commands": [
+        "ps aux --sort=-%cpu | head -12"
+      ],
+      "rules": [
+        {
+          "regex": "(?i)(xmrig|minerd|nicehash)",
+          "problem_if": "found",
+          "message": "процессов, похожих на майнер: {n}",
+          "ok_message": "подозрительных процессов нет"
+        }
+      ]
+    }
+  ],
+  "fixes": [
+    {
+      "id": "flush-caches",
+      "title": "Сбросить кэш DNS (resolvectl)",
+      "confirm": "Сбросить кэш DNS на этом компьютере?",
+      "needs_admin": true,
+      "commands": [
+        "resolvectl flush-caches"
+      ]
+    }
+  ]
+}

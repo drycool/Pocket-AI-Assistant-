@@ -94,7 +94,13 @@ func runRemote(cfg Config, brokerURL, secret, oneCmd string) int {
 		}
 		return rc
 	}
-	rc := remoteREPL(base, secret, code, key, events, arch)
+	// R5: после пары — меню оператора, если не просили старую консоль.
+	var rc int
+	if operatorPlain {
+		rc = remoteREPL(base, secret, code, key, events, arch)
+	} else {
+		rc = runOperatorUI(cfg, base, secret, code, key, events, arch)
+	}
 	if arch.dirty {
 		// Заметку берём из последнего сохранения: иначе quit после `save
 		// заметка` перезаписывал уроки пустой заметкой и вывод оператора

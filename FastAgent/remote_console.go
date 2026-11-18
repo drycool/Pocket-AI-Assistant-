@@ -54,7 +54,7 @@ func runRemote(cfg Config, brokerURL, secret, oneCmd string) int {
 		return 1
 	}
 	fmt.Println("===================================================")
-	fmt.Println("        FASTAGENT — консоль удалённой диагностики (R1–R4)")
+	fmt.Println("        FASTAGENT — консоль удалённой диагностики (R1–R5)")
 	fmt.Println("===================================================")
 	fmt.Printf("Сессия: %s | брокер: %s\n", code, base)
 	if path, terr := remoteTicketFile(cfg, code); terr == nil {
@@ -75,7 +75,7 @@ func runRemote(cfg Config, brokerURL, secret, oneCmd string) int {
 		fmt.Println("[!] Гость не подключился.")
 		return 1
 	}
-	fmt.Println("[OK] Гость на связи. " + strings.SplitN(consoleHelp, "\n", 2)[0])
+	fmt.Println("[OK] Гость на связи. Дальше — меню; старая консоль команд: -plain.")
 	if archiveMemoryDir != "" {
 		note := ""
 		if archiveReindex {

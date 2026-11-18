@@ -643,7 +643,7 @@ func runBroker(addr, secret, ticket string) int {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	fmt.Println("===================================================")
-	fmt.Println("        FASTAGENT — брокер удалённой диагностики (R1–R4)")
+	fmt.Println("        FASTAGENT — брокер удалённой диагностики (R1–R5)")
 	fmt.Println("===================================================")
 	fmt.Printf("Слушаю: http://%s/fa/*\n", addr)
 	if secret == "" {

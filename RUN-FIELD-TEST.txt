@@ -68,7 +68,10 @@ L2-tools: НОВОЕ. Инструмент write_file:
           2) второй файл → n → «[BLOCK] оператор отказался»;
           3) read_file того же файла → содержимое «проверка записи»;
           4) запись в C:\Windows\fa-fieldkit.txt → БЕЗ вопроса:
-             «[BLOCK] системный каталог — запись запрещена политикой».
+             «[BLOCK] системный каталог — запись запрещена политикой»;
+          5) «echo привет>C:\Users\Public\fa-redir.txt» → вопрос
+             «Запустить? (y/n)» (перенаправление — это изменение, а не
+             чтение), ответ n → «Отменено оператором», файла нет.
 
 L2-sfc:   sfc /scannow + dism /restorehealth → y → реальные коды возврата,
           итоги «Защита ресурсов Windows не обнаружила нарушений» и
@@ -77,7 +80,7 @@ L2-sfc:   sfc /scannow + dism /restorehealth → y → реальные коды
 
 3) ЧТО ДОЛЖНО БЫТЬ ПОСЛЕ СЕССИЙ
 -------------------------------
-- [policy]  ИТОГ: 26/26 OK — политика ведёт себя как задумано.
+- [policy]  ИТОГ: 30/30 OK — политика ведёт себя как задумано.
 - [selftest] три блока (L0, L2, L3), в каждом ИТОГ: 6/6 OK.
 - [ask]     -ask L1: read_file выполнен, содержимое win.ini в ответе.
             -ask L2: write_file → «нужно подтверждение оператора, но сессия
@@ -133,7 +136,7 @@ L2-sfc:   sfc /scannow + dism /restorehealth → y → реальные коды
   admin-stick\Data\logs\field-test-*.txt     <- сводный отчёт (главный файл)
   admin-stick\Data\logs\field-L*-*.txt       <- стенограммы 8 сессий
   admin-stick\Data\logs\field-ask-*.txt      <- проверка -ask
-  admin-stick\Data\logs\field-policy-*.txt   <- политика (ожидаем 26/26 OK)
+  admin-stick\Data\logs\field-policy-*.txt   <- политика (ожидаем 30/30 OK)
   admin-stick\Data\logs\field-selftest-*.txt <- самопроверка (ожидаем 6/6 OK)
   admin-stick\Data\logs\actions_*.log        <- журнал выполненных команд
 

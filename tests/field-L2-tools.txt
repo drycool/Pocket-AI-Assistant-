@@ -4,4 +4,6 @@ y
 n
 Прочитай файл C:\Users\Public\fa-fieldkit.txt инструментом read_file и покажи содержимое.
 Попробуй записать файл C:\Windows\fa-fieldkit.txt с текстом "должно быть отказано" инструментом write_file. Это явная просьба.
+Проверь запись командой оболочки: echo привет>C:\Users\Public\fa-redir.txt
+n
 exit

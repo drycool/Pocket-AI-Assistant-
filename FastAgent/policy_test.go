@@ -53,6 +53,22 @@ func TestClassify(t *testing.T) {
 		{"filebeat --once", L1Read, VNotAllowed},
 		{"ifconfig -a", L1Read, VReadOnly},
 		{"top -b -n 1", L1Read, VReadOnly},
+		// Запись через перенаправление — изменение, а не чтение. Дефект полевого
+		// теста 18.11.2026: `echo второй>C:\Users\Public\f.txt` было
+		// классифицировано «чтение» и выполнено без подтверждения — сразу
+		// после того, как оператор отказал в той же записи через write_file.
+		{`echo test>C:\Users\Public\fa-test.txt`, L1Read, VNotAllowed},
+		{`echo test>C:\Users\Public\fa-test.txt`, L2Fix, VNeedsYes},
+		{`echo test>C:\Users\Public\fa-test.txt`, L3Admin, VNeedsYes},
+		{`echo test >> C:\Users\Public\fa-test.txt`, L2Fix, VNeedsYes},
+		{`dir C:\ > C:\Users\Public\list.txt`, L2Fix, VNeedsYes},
+		// Подавление вывода и перенаправление потоков — не запись в файл.
+		{`ipconfig /all >nul`, L1Read, VReadOnly},
+		{`ipconfig /all 2>&1`, L1Read, VReadOnly},
+		{`grep "a>b" /etc/hosts`, L1Read, VReadOnly},
+		// PowerShell-глагол записи внутри конвейера — тоже изменение.
+		{`powershell -c "Get-Service | Out-File C:\Users\Public\svc.txt"`, L1Read, VNotAllowed},
+		{`powershell -c "Get-Service | Out-File C:\Users\Public\svc.txt"`, L2Fix, VNeedsYes},
 		// Регрессия: PowerShell Format-Table в конвейере не должен считаться
 		// «форматированием диска» (было из-за \bformat\b)
 		{`Get-WinEvent -MaxEvents 10 | Format-Table TimeCreated, Id, Message -AutoSize`, L1Read, VReadOnly},

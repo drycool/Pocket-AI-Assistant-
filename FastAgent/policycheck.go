@@ -59,6 +59,17 @@ var policyCases = []policyCase{
 	{"dism /online /cleanup-image /restorehealth", [4]Verdict{VForbidden, VNotAllowed, VNeedsYes, VNeedsYes}},
 	{"restart-service Spooler", [4]Verdict{VForbidden, VNotAllowed, VNeedsYes, VNeedsYes}},
 
+	// --- запись через перенаправление: изменение, а не чтение (дефект
+	// полевого теста 18.11.2026 — `echo x>f` шёл как «чтение») ---
+	{`echo test>C:\Users\Public\fa-check.txt`,
+		[4]Verdict{VForbidden, VNotAllowed, VNeedsYes, VNeedsYes}},
+	{`dir C:\ > C:\Users\Public\fa-check.txt`,
+		[4]Verdict{VForbidden, VNotAllowed, VNeedsYes, VNeedsYes}},
+	{`powershell -c "Get-Service | Out-File C:\Users\Public\fa-check.txt"`,
+		[4]Verdict{VForbidden, VNotAllowed, VNeedsYes, VNeedsYes}},
+	// --- подавление вывода — по-прежнему чтение ---
+	{"ipconfig /all >nul", [4]Verdict{VForbidden, VReadOnly, VReadOnly, VReadOnly}},
+
 	// --- опасное: запрещено всегда, на L3 — двойное подтверждение ---
 	{"wevtutil cl System", [4]Verdict{VForbidden, VForbidden, VForbidden, VDangerous}},
 	{"format C:", [4]Verdict{VForbidden, VForbidden, VForbidden, VDangerous}},

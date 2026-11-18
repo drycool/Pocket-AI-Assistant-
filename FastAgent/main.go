@@ -233,6 +233,11 @@ var (
 		regexp.MustCompile(`\|\s*(bash|sh|zsh|cmd|powershell|pwsh|iex|invoke-expression)\b`), // конвейер в интерпретатор
 		regexp.MustCompile(`^sed\s+-i`), regexp.MustCompile(`^awk\s.*>\s*\S`), regexp.MustCompile(`^xargs\s`),
 	}
+
+	// reShellWriteCmd — PowerShell-глаголы и cmd-let'ы, которые пишут файл.
+	// Их нельзя пускать по белому списку чтения только потому, что команда
+	// начинается с Get-*: `Get-Service | Out-File x` — это запись.
+	reShellWriteCmd = regexp.MustCompile(`(^|[;&|]\s*)(out-file|set-content|add-content|tee-object|export-csv|export-clixml|new-item)\b`)
 )
 
 // unwrapShell снимает обёртки `powershell -c "..."` / `pwsh -Command "..."`.
@@ -264,6 +269,54 @@ func unwrapShell(c string) (inner string, opaque bool) {
 	in := strings.TrimSpace(c[loc[1]:])
 	in = strings.Trim(in, `"'`)
 	return in, false
+}
+
+// shellWritesFile — пишет ли команда в файл через перенаправление (`>`, `>>`)
+// или PowerShell-глагол записи. Смотрим только вне кавычек: `grep "a>b"` —
+// чтение, а `grep a > b.txt` — запись, и разница видна только с учётом
+// кавычек. `>nul`, `2>&1` и `>$null` записью не считаются: это подавление
+// вывода, а не изменение файла.
+func shellWritesFile(c string) bool {
+	if reShellWriteCmd.MatchString(c) {
+		return true
+	}
+	var quote byte
+	for i := 0; i < len(c); i++ {
+		ch := c[i]
+		switch {
+		case quote != 0:
+			if ch == quote {
+				quote = 0
+			}
+		case ch == '"' || ch == '\'':
+			quote = ch
+		case ch == '>':
+			j := i + 1
+			if j < len(c) && c[j] == '>' {
+				j++
+			}
+			for j < len(c) && (c[j] == ' ' || c[j] == '\t') {
+				j++
+			}
+			if j < len(c) && c[j] == '&' { // 2>&1 — перенаправление потока
+				i = j
+				continue
+			}
+			start := j
+			for j < len(c) && c[j] != ' ' && c[j] != '\t' && c[j] != ';' && c[j] != '&' && c[j] != '|' {
+				j++
+			}
+			target := strings.Trim(strings.ToLower(c[start:j]), `"`)
+			// Пустая цель — незаконченное перенаправление: считаем записью,
+			// чтобы политика отказывала закрыто, а не открыто.
+			if target == "nul" || target == "nul:" || target == "/dev/null" || target == "$null" {
+				i = j
+				continue
+			}
+			return true
+		}
+	}
+	return false
 }
 
 // classify — центральная точка политики: что делать с командой на уровне level.
@@ -309,6 +362,19 @@ func classifyDepth(cmd string, level, depth int) Verdict {
 			}
 			return VForbidden
 		}
+	}
+	// Запись в файл через перенаправление — изменение, даже если сама команда
+	// в белом списке чтения. Полевой тест 18.11.2026 это доказал: `echo
+	// второй>C:\Users\Public\f.txt` сразу после отказа оператора на
+	// write_file было классифицировано «чтение» и выполнено без подтверждения.
+	if shellWritesFile(c) {
+		if level >= L2Fix {
+			return VNeedsYes
+		}
+		if level >= L1Read {
+			return VNotAllowed
+		}
+		return VForbidden
 	}
 	for _, re := range reFixAllowed {
 		if re.MatchString(c) {

@@ -164,6 +164,77 @@ func queryRag(ctx context.Context, cfg RagConfig, question string, forceGraph bo
 	return ans, nil
 }
 
+// FeedbackAnswer — что роутер ответил на вердикт. Вердикт — единственная
+// настоящая разметка этой системы: роутер не может судить свой ответ сам, а
+// оператор, который видел справку, может.
+type FeedbackAnswer struct {
+	Verdict       string
+	Recorded      bool
+	KnownDecision bool
+	Verdicts      int
+	Previous      string
+}
+
+// postJevFeedback отправляет вердикт по decision_id. Источник — human: команду
+// печатает человек за терминалом, а не модель. query уходит вместе с вердиктом,
+// потому что в журнале решений хранится только хеш вопроса, и без него вердикт
+// читателю ничего не скажет.
+func postJevFeedback(cfg RagConfig, decisionID, verdict, query, comment string) (FeedbackAnswer, error) {
+	decisionID = strings.TrimSpace(decisionID)
+	if decisionID == "" {
+		return FeedbackAnswer{}, errors.New("нет decision_id: вердикт ставится по ответу /rag")
+	}
+	switch verdict {
+	case "accepted", "partial", "rejected":
+	default:
+		return FeedbackAnswer{}, fmt.Errorf("вердикт %q не подходит: accepted | partial | rejected", verdict)
+	}
+	base := strings.TrimRight(strings.TrimSpace(cfg.URL), "/")
+	if base == "" {
+		return FeedbackAnswer{}, errors.New("rag.url не задан в config.fast.json — некуда отправлять вердикт")
+	}
+	payload, err := json.Marshal(map[string]any{
+		"decision_id": decisionID,
+		"verdict":     verdict,
+		"source":      "human",
+		"comment":     comment,
+		"query":       query,
+	})
+	if err != nil {
+		return FeedbackAnswer{}, err
+	}
+	cctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(cctx, http.MethodPost, base+"/feedback", bytes.NewReader(payload))
+	if err != nil {
+		return FeedbackAnswer{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	if err != nil {
+		return FeedbackAnswer{}, fmt.Errorf("вердикт не отправлен (%s): %w", base, err)
+	}
+	defer resp.Body.Close()
+	raw, err := readAllLimited(resp.Body, 64<<10)
+	if err != nil {
+		return FeedbackAnswer{}, fmt.Errorf("чтение ответа: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return FeedbackAnswer{}, fmt.Errorf("роутер вернул HTTP %d: %s", resp.StatusCode, truncate(string(raw), 300))
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return FeedbackAnswer{}, fmt.Errorf("разбор ответа: %w", err)
+	}
+	return FeedbackAnswer{
+		Verdict:       anyString(m["verdict"]),
+		Recorded:      anyBool(m["recorded"]),
+		KnownDecision: anyBool(m["known_decision"]),
+		Verdicts:      int(anyInt64(m["verdicts_for_decision"])),
+		Previous:      anyString(m["previous_verdict"]),
+	}, nil
+}
+
 // --- маленькие разборщики JSON: поля приходят то строкой, то числом ---
 
 func anyString(v any) string {

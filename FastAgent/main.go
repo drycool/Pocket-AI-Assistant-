@@ -1030,9 +1030,17 @@ func runCommand(cmd string, timeout time.Duration) (string, int, error) {
 	return finalizeOutput(out), code, nil
 }
 
-var reCmdBlock = regexp.MustCompile("(?ms)```(?:cmd|bat|powershell|ps1|bash|sh|shell|console)?\\s*\\n(.*?)```")
+// reCmdBlock берёт ТОЛЬКО блоки с языком. Раньше метка была необязательной, и
+// блок без метки тоже считался командами — а модель цитирует так вывод: в
+// полевом прогоне 18.11.2026 она показала содержимое win.ini в блоке без метки,
+// и каждая строка файла (`[fonts]`, `MAPI=1`) ушла на исполнение. На L1 их
+// отсёк белый список, но на L3 цитата чужого файла — это исполнение его строк
+// через cmd: путь инъекции. Метка языка — и есть различие между «приложи
+// команды» и «покажи текст», поэтому без метки не исполняется ничего.
+var reCmdBlock = regexp.MustCompile("(?ms)```(?:cmd|bat|powershell|pwsh|ps1|bash|sh|shell|console)[ \\t]*\\n(.*?)```")
 
 // extractCommands достаёт команды из блоков кода вида ```cmd ... ```.
+// Блок без метки языка — цитата, а не задание: см. комментарий у reCmdBlock.
 func extractCommands(answer string) []string {
 	var cmds []string
 	for _, m := range reCmdBlock.FindAllStringSubmatch(answer, -1) {
@@ -1121,6 +1129,12 @@ func main() {
 		"оператор: new — создать сессию, положить файл-билет и вести её из консоли")
 	remoteCmdFlag := flag.String("remote-cmd", "",
 		"оператор: одна команда для -remote new, без REPL (например, \"diag\")")
+	memoryDirFlag := flag.String("memory-dir", os.Getenv("JEV_MEMORY_DIR"),
+		"R4: корпус памяти Jev для уроков сессии (по умолчанию JEV_MEMORY_DIR; пусто — только txt-архив)")
+	reindexFlag := flag.Bool("reindex", false,
+		"R4: после записи уроков пересобрать FTS5 и вектора памяти (нужны python3 и scripts Jev)")
+	jevDirFlag := flag.String("jev-dir", firstNonEmpty(os.Getenv("JEV_HOME"), "/home/dry/Jev"),
+		"R4: каталог Jev со scripts/ (для -reindex)")
 	flag.Parse()
 
 	initPaths()
@@ -1169,6 +1183,9 @@ func main() {
 		if *ticketExe != "" {
 			cfg.Remote.TicketExe = *ticketExe // тот же флаг, что у брокера: один путь, без правки конфига
 		}
+		archiveMemoryDir = strings.TrimSpace(*memoryDirFlag)
+		archiveReindex = *reindexFlag
+		archiveJevDir = strings.TrimSpace(*jevDirFlag)
 		os.Exit(runRemote(cfg, *brokerURLFlag, *brokerSecret, *remoteCmdFlag))
 	}
 	if *serveFlag {
@@ -1241,6 +1258,7 @@ func main() {
 	}
 	fmt.Println("Команды: /level N — сменить уровень | /diag — собрать диагностику | /report — отчёт |")
 	fmt.Println("         /rag ВОПРОС — спросить базу знаний | /rag graph ВОПРОС — граф LightRAG |")
+	fmt.Println("         /fb accepted|partial|rejected [комментарий] — вердикт по последней справке")
 	fmt.Println("         /follow on|off — авто-продолжение | /clear — очистить контекст | exit — выход")
 	fmt.Println()
 
@@ -1248,6 +1266,10 @@ func main() {
 	sessionFile := filepath.Join(sessionsDir, sessionID+".json")
 
 	var history []Message
+	// Последняя справка /rag: по её decision_id ставится вердикт /fb. Храним и
+	// вопрос — в журнале решений Jev лежит только хеш, и вердикт без вопроса
+	// читателю ничего не скажет.
+	var lastRagDecision, lastRagQuery string
 
 	if *diagFlag && currentLevel >= L1Read {
 		history = append(history, Message{Role: "user", Content: diagnosticsPrompt()})
@@ -1274,7 +1296,7 @@ func main() {
 
 		case low == "/help":
 			fmt.Println("L0 чат | L1 чтение | L2 безопасные починки | L3 полный доступ")
-			fmt.Println("/level N, /diag, /report, /rag <вопрос> [/rag graph <вопрос>], /follow on|off, /clear, exit")
+			fmt.Println("/level N, /diag, /report, /rag <вопрос> [/rag graph <вопрос>], /fb <вердикт>, /follow on|off, /clear, exit")
 			continue
 
 		case strings.HasPrefix(low, "/level"):
@@ -1327,6 +1349,37 @@ func main() {
 			fmt.Printf("[OK] Снимок собран: %s (%d байт)\n", histFile, len(snap))
 			continue
 
+		case strings.HasPrefix(low, "/fb"):
+			// Вердикт по справке: единственная настоящая разметка слоя знаний —
+			// его владелец не может судить свой ответ сам (см. core Jev).
+			fields := strings.Fields(input)
+			if len(fields) < 2 {
+				fmt.Println("Использование: /fb accepted|partial|rejected [комментарий] — вердикт по последней справке /rag.")
+				continue
+			}
+			verdict := strings.ToLower(fields[1])
+			comment := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(input[len(fields[0]):]), fields[1]))
+			if lastRagDecision == "" {
+				fmt.Println("[!] Вердикт ставить не по чему: не было справки /rag с decision_id.")
+				continue
+			}
+			ans, ferr := postJevFeedback(cfg.Rag, lastRagDecision, verdict, lastRagQuery, comment)
+			if ferr != nil {
+				fmt.Printf("[!] %v\n", ferr)
+				continue
+			}
+			note := fmt.Sprintf("decision_id=%s verdict=%s известен=%v голосов=%d",
+				lastRagDecision, ans.Verdict, ans.KnownDecision, ans.Verdicts)
+			if ans.Previous != "" {
+				note += " предыдущий=" + ans.Previous
+			}
+			logAction(currentLevel, "jev_feedback", VReadOnly, true, 0, note)
+			fmt.Printf("[OK] вердикт записан в Jev: %s\n", note)
+			if !ans.KnownDecision {
+				fmt.Println("[i] Роутер не знает этот decision_id (журнал решений мог ротироваться) — вердикт лёг сиротой.")
+			}
+			continue
+
 		case strings.HasPrefix(low, "/rag"):
 			// Слой знаний внутри бинарника: тот же запрос, что делает
 			// scripts/rag_query.bat, но без curl и jq на гостевом ПК.
@@ -1347,6 +1400,7 @@ func main() {
 				continue
 			}
 			fmt.Printf("[RAG] %s\n", ans.MetaLine())
+			lastRagDecision, lastRagQuery = ans.DecisionID, q
 			fmt.Println(truncate(ans.Text, 6000))
 			history = append(history, Message{Role: "user",
 				Content: "Справка из базы знаний (" + ans.MetaLine() + "):\n" + truncate(ans.Text, 6000)})

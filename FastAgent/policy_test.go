@@ -157,6 +157,27 @@ func TestExtractCommands(t *testing.T) {
 			t.Errorf("команда %d: получено %q, ожидалось %q", i, got[i], want[i])
 		}
 	}
+
+	// Блок без метки языка — цитата, а не задание на исполнение. Живой случай
+	// 18.11.2026: содержимое win.ini, показанное в ``` без метки, ушло на
+	// исполнение построчно (`[fonts]`, `MAPI=1`).
+	quoted := "Файл win.ini:\n\n```\n; for 16-bit app support\n[fonts]\nMAPI=1\n```\n"
+	if cmds := extractCommands(quoted); len(cmds) != 0 {
+		t.Fatalf("цитата без метки принята за команды: %v", cmds)
+	}
+
+	// Вывод dir/glob, тоже без метки, — тем более не команды.
+	listing := "Нашёл файлы:\n```\nBoot/BootDebuggerFiles.ini\nFonts/desktop.ini\n```\n"
+	if cmds := extractCommands(listing); len(cmds) != 0 {
+		t.Fatalf("список файлов принят за команды: %v", cmds)
+	}
+
+	// С меткой — исполняется, включая pwsh и bash.
+	for _, body := range []string{"```pwsh\nGet-Service Spooler\n```", "```bash\nip -br addr\n```"} {
+		if cmds := extractCommands(body); len(cmds) != 1 {
+			t.Fatalf("блок с меткой не разобран: %q -> %v", body, cmds)
+		}
+	}
 }
 
 func TestBuildMessagesLimitsHistory(t *testing.T) {

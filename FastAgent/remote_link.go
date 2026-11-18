@@ -1,4 +1,4 @@
-// remote_link.go — гостевая сторона удалённой диагностики (этапы R1–R3).
+// remote_link.go — гостевая сторона удалённой диагностики (этапы R1–R4).
 //
 // На гостевом ПК запускается один exe; код сессии берётся из ИМЕНИ файла
 // (fastagent-a1b2c3.exe), поэтому на чужой клавиатуре не набирается ничего.
@@ -84,7 +84,7 @@ func runLink(cfg Config, brokerURL string) int {
 		fmt.Println("[i] Удалённый режим: уровень L2 — L3 удалённо не разрешён.")
 	}
 	fmt.Println("===================================================")
-	fmt.Println("        FASTAGENT — гость удалённой диагностики (R1–R3)")
+	fmt.Println("        FASTAGENT — гость удалённой диагностики (R1–R4)")
 	fmt.Println("===================================================")
 	fmt.Printf("Сессия: %s | брокер: %s\n", code, base)
 	fmt.Println("[i] Связь установлена. Жду команды оператора: чтение всегда,")
@@ -189,6 +189,14 @@ func remoteExec(c remoteCmd) execOutcome {
 	}
 	if c.Kind == "put_file" {
 		return remoteExecPut(c, args)
+	}
+	if c.Kind == "journal" {
+		// R4: свой журнал — это чтение, подтверждения не требует. Отдаём хвост,
+		// а не файл целиком: журнал в этой сессии уже может быть на сотни строк,
+		// а оператору нужны вердикты и approved, то есть последние шаги.
+		out, rc := linkJournal(args)
+		logRemoteAction("journal", VReadOnly, true, out)
+		return execOutcome{out: truncate(out, remoteMaxResultSize), exit: rc, ok: true}
 	}
 	verdict := classifyTool(c.Kind, L1Read)
 	if verdict != VReadOnly && !c.Approved {
@@ -540,6 +548,34 @@ func remoteLogPath() string {
 		return name
 	}
 	return filepath.Join(logsDir, name)
+}
+
+// linkJournal — R4: хвост собственного журнала гостя для архива сессии.
+// Первые строки ответа — host= и path=: оператор узнаёт, у кого именно он
+// снимал диагностику и где лежит полный журнал (его можно забрать через get).
+func linkJournal(args map[string]any) (string, int) {
+	n := archiveJournalLines
+	if v, ok := args["lines"].(float64); ok && v > 0 {
+		n = int(v)
+	}
+	if n > 1000 {
+		n = 1000
+	}
+	path := remoteLogPath()
+	var b strings.Builder
+	fmt.Fprintf(&b, "host=%s\npath=%s\n", hostname(), path)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		fmt.Fprintf(&b, "журнал недоступен: %v\n", err)
+		return b.String(), 1
+	}
+	body := tailLines(string(data), n)
+	lines := strings.Count(body, "\n") + 1
+	if strings.TrimSpace(body) == "" {
+		lines = 0
+	}
+	fmt.Fprintf(&b, "lines=%d\n---\n%s", lines, body)
+	return b.String(), 0
 }
 
 // ---------------------------------------------------------------------------

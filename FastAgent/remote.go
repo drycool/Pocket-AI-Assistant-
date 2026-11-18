@@ -1,4 +1,4 @@
-// remote.go — удалённая диагностика, этапы R1–R3 (см. REMOTE-DIAG.md).
+// remote.go — удалённая диагностика, этапы R1–R4 (см. REMOTE-DIAG.md).
 //
 // Инверсия направления: на гостевой ПК попадает ОДИН exe, он сам звонит на
 // брокер (pi5), а оператор работает в своём терминале. Здесь — общая часть:
@@ -643,7 +643,7 @@ func runBroker(addr, secret, ticket string) int {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	fmt.Println("===================================================")
-	fmt.Println("        FASTAGENT — брокер удалённой диагностики (R1–R3)")
+	fmt.Println("        FASTAGENT — брокер удалённой диагностики (R1–R4)")
 	fmt.Println("===================================================")
 	fmt.Printf("Слушаю: http://%s/fa/*\n", addr)
 	if secret == "" {

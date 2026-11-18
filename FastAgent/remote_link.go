@@ -3,7 +3,9 @@
 // На гостевом ПК запускается один exe; код сессии берётся из ИМЕНИ файла
 // (fastagent-a1b2c3.exe), поэтому на чужой клавиатуре не набирается ничего.
 // Гость звонит наружу, длинно поллит команды, проверяет подпись и исполняет
-// ТОЛЬКО чтение: diag, read_file, grep_search, file_glob_search.
+// R1 (чтение: diag, read_file, grep_search, file_glob_search) и R2 (`run` —
+// только после подтверждения оператора). L3 удалённо не разрешён: уровень
+// гостя в этом режиме — L2, опасное и «вне белого списка» отклоняется.
 package main
 
 import (
@@ -67,13 +69,22 @@ func runLink(cfg Config, brokerURL string) int {
 		return 1
 	}
 	key := remoteDeriveKey(code, guest)
+	// R2: удалённо — не выше L2. Ниже L2 поднимаем: иначе «починка» недоступна
+	// вовсе; выше L2 не поднимаем никогда (L3 остаётся физическому присутствию).
+	if currentLevel < L2Fix {
+		currentLevel = L2Fix
+		fmt.Println("[i] Удалённый режим: уровень поднят до L2 (каждое изменение — только с y/n оператора).")
+	} else if currentLevel > L2Fix {
+		currentLevel = L2Fix
+		fmt.Println("[i] Удалённый режим: уровень L2 — L3 удалённо не разрешён.")
+	}
 	fmt.Println("===================================================")
-	fmt.Println("        FASTAGENT — гость удалённой диагностики (R1)")
+	fmt.Println("        FASTAGENT — гость удалённой диагностики (R2)")
 	fmt.Println("===================================================")
 	fmt.Printf("Сессия: %s | брокер: %s\n", code, base)
-	fmt.Println("[i] Связь установлена. Жду команды оператора: только чтение")
-	fmt.Println("    (diag, read_file, grep_search, file_glob_search). Ctrl+C — выйти.")
-	logRemoteAction("link-start", VReadOnly, "code="+code)
+	fmt.Println("[i] Связь установлена. Жду команды оператора: чтение всегда,")
+	fmt.Println("    run — только после подтверждения у оператора. Ctrl+C — выйти.")
+	logRemoteAction("link-start", VReadOnly, true, "code="+code)
 
 	backoff := time.Second
 	for {
@@ -98,12 +109,20 @@ func runLink(cfg Config, brokerURL string) int {
 			// Подпись не сходится — значит это не та консоль или команду
 			// подделали по дороге. Не исполняем и не отвечаем содержимым.
 			fmt.Printf("[link] ОТКАЗ: подпись команды %s не сходится\n", cmd.ID)
-			logRemoteAction("cmd-rejected", VForbidden, "bad signature id="+cmd.ID)
+			logRemoteAction("cmd-rejected", VForbidden, false, "bad signature id="+cmd.ID)
 			continue
 		}
 		start := time.Now()
-		out, rc, ok := remoteExec(*cmd)
-		res := remoteResult{ID: cmd.ID, OK: ok, Out: out, Exit: rc, MS: time.Since(start).Milliseconds()}
+		out := remoteExec(*cmd)
+		res := remoteResult{
+			ID:            cmd.ID,
+			OK:            out.ok,
+			Out:           out.out,
+			Exit:          out.exit,
+			MS:            time.Since(start).Milliseconds(),
+			NeedsApproval: out.needsApproval,
+			Verdict:       out.verdict,
+		}
 		if err := linkResult(base, guest, res); err != nil {
 			fmt.Printf("[link] результат не отправлен: %v\n", err)
 		}
@@ -112,43 +131,106 @@ func runLink(cfg Config, brokerURL string) int {
 
 var errRemoteClosed = errors.New("сессия закрыта")
 
+// execOutcome — итог исполнения на госте. NeedsApproval отдельным полем, а не
+// «магическим» exit-кодом: консоль не должна угадывать по тексту.
+type execOutcome struct {
+	out           string
+	exit          int
+	ok            bool
+	needsApproval bool
+	verdict       string
+}
+
 // remoteExec — исполнение команды НА ГОСТЕ. Политика проверяется здесь, а не
-// на брокере: чужая сторона не может попросить выполнить то, что R1 запрещает.
-func remoteExec(c remoteCmd) (string, int, bool) {
+// на брокере: чужая сторона не может попросить выполнить то, что гость
+// запрещает. R2: изменение исполняется только при c.Approved (подписано
+// оператором), опасное и «вне белого списка» на L2 отклоняется.
+func remoteExec(c remoteCmd) execOutcome {
 	var args map[string]any
 	if len(c.Args) > 0 && string(c.Args) != "null" {
 		if err := json.Unmarshal(c.Args, &args); err != nil {
-			logRemoteAction(c.Kind, VForbidden, "битые аргументы: "+err.Error())
-			return "битые аргументы: " + err.Error(), -1, false
+			logRemoteAction(c.Kind, VForbidden, false, "битые аргументы: "+err.Error())
+			return execOutcome{out: "битые аргументы: " + err.Error(), exit: -1}
 		}
 	}
 	if c.Kind == "diag" {
 		out, rc, err := runCommand(readOnlyDiag(), 90*time.Second)
 		if err != nil {
-			logRemoteAction("diag", VReadOnly, err.Error())
-			return "ошибка диагностики: " + err.Error(), -1, false
+			logRemoteAction("diag", VReadOnly, false, err.Error())
+			return execOutcome{out: "ошибка диагностики: " + err.Error(), exit: -1}
 		}
-		logRemoteAction("diag", VReadOnly, out)
-		return truncate(out, remoteMaxResultSize), rc, true
+		logRemoteAction("diag", VReadOnly, true, out)
+		return execOutcome{out: truncate(out, remoteMaxResultSize), exit: rc, ok: true}
+	}
+	if c.Kind == "run" {
+		return remoteExecRun(c, args)
 	}
 	verdict := classifyTool(c.Kind, L1Read)
-	if verdict != VReadOnly {
+	if verdict != VReadOnly && !c.Approved {
 		msg := fmt.Sprintf("R1: инструмент %q недоступен удалённо — только чтение", c.Kind)
-		logRemoteAction("tool:"+c.Kind, verdict, msg)
-		return msg, -1, false
+		logRemoteAction("tool:"+c.Kind, verdict, false, msg)
+		return execOutcome{out: msg, exit: -1, verdict: verdict.String()}
 	}
 	out, err := execTool(c.Kind, args)
 	if err != nil {
-		logRemoteAction("tool:"+c.Kind, verdict, err.Error())
-		return "ошибка: " + err.Error(), 1, false
+		logRemoteAction("tool:"+c.Kind, verdict, c.Approved, err.Error())
+		return execOutcome{out: "ошибка: " + err.Error(), exit: 1, verdict: verdict.String()}
 	}
-	logRemoteAction("tool:"+c.Kind, verdict, out)
-	return truncate(out, remoteMaxResultSize), 0, true
+	logRemoteAction("tool:"+c.Kind, verdict, c.Approved, out)
+	return execOutcome{out: truncate(out, remoteMaxResultSize), ok: true}
+}
+
+// remoteExecRun — R2: команда по политике гостя. Порядок как в локальном
+// handleCommand: сначала вердикт, потом подтверждение, потом запуск и журнал.
+// Вердикт считает гость; брокер и консоль на него не влияют.
+func remoteExecRun(c remoteCmd, args map[string]any) execOutcome {
+	cmdText, _ := args["command"].(string)
+	cmdText = strings.TrimSpace(cmdText)
+	if cmdText == "" {
+		logRemoteAction("run", VForbidden, false, "пустая команда")
+		return execOutcome{out: "пустая команда", exit: -1}
+	}
+	verdict := classify(cmdText, currentLevel)
+	switch verdict {
+	case VForbidden, VNotAllowed:
+		// L3 удалённо не разрешён: опасное и «вне белого списка» — отказ, и
+		// никакое approved здесь не помогает — это граница режима, а не сессии.
+		msg := fmt.Sprintf("R2: команда не выполняется на госте (уровень L%d): %s", currentLevel, verdict)
+		logRemoteAction(cmdText, verdict, false, "отказ: "+msg)
+		return execOutcome{out: msg, exit: -1, verdict: verdict.String()}
+	case VNeedsYes, VDangerous:
+		if !c.Approved {
+			logRemoteAction(cmdText, verdict, false, "ждёт подтверждения оператора")
+			return execOutcome{
+				out:           fmt.Sprintf("нужно подтверждение оператора: %s", verdict),
+				exit:          -2,
+				needsApproval: true,
+				verdict:       verdict.String(),
+			}
+		}
+	}
+	start := time.Now()
+	tmo := commandTimeout(cmdText)
+	out, code, err := runCommand(cmdText, tmo)
+	dur := time.Since(start)
+	if err != nil && strings.TrimSpace(out) == "" {
+		out = "ошибка запуска: " + err.Error()
+	}
+	logRemoteAction(cmdText, verdict, c.Approved, fmt.Sprintf("exit=%d %.2fs %s",
+		code, dur.Seconds(), truncate(out, 1000)))
+	return execOutcome{
+		out:     truncate(out, remoteMaxResultSize),
+		exit:    code,
+		ok:      true,
+		verdict: verdict.String(),
+	}
 }
 
 // logRemoteAction — отдельный журнал гостя: provenance=remote виден сразу,
-// как и в проектной записке (§5). Пишется и при отказе.
-func logRemoteAction(cmd string, verdict Verdict, out string) {
+// как и в проектной записке (§5). Пишется и при отказе. approved приходит
+// из подписанной команды, а не выводится из вердикта: иначе выполненная после
+// y/n починка оставалась бы в журнале «неподтверждённой».
+func logRemoteAction(cmd string, verdict Verdict, approved bool, out string) {
 	if logsDir == "" {
 		return // go test: пути ещё не инициализированы, файл в каталоге репозитория не нужен
 	}
@@ -158,7 +240,7 @@ func logRemoteAction(cmd string, verdict Verdict, out string) {
 		"level":      currentLevel,
 		"cmd":        cmd,
 		"verdict":    verdict.String(),
-		"approved":   verdict == VReadOnly, // R1: подтверждений нет, только чтение
+		"approved":   approved,
 		"output":     truncate(out, 1000),
 		"host":       hostname(),
 	}

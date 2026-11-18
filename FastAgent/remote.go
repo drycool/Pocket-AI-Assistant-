@@ -54,6 +54,10 @@ type remoteCmd struct {
 	Args json.RawMessage `json:"args,omitempty"`
 	Sig  string          `json:"sig"`
 	TS   int64           `json:"ts"`
+	// Approved — «оператор подтвердил» для R2: ставится в true только после
+	// y/n в консоли оператора и входит в подпись. Гость без него изменение не
+	// выполняет, поэтому сам брокер подтверждение подделать не может.
+	Approved bool `json:"approved,omitempty"`
 }
 
 // remoteResult — ответ гостя. OK=false означает отказ политики или ошибку
@@ -64,6 +68,10 @@ type remoteResult struct {
 	Out  string `json:"out,omitempty"`
 	Exit int    `json:"exit"`
 	MS   int64  `json:"ms"`
+	// NeedsApproval — R2: гость посчитал команду «изменяющей» и ждёт y/n
+	// оператора; Verdict объясняет, что именно он подтверждает.
+	NeedsApproval bool   `json:"needs_approval,omitempty"`
+	Verdict       string `json:"verdict,omitempty"`
 }
 
 // remoteEvent — то, что брокер отдаёт оператору по SSE.
@@ -92,20 +100,22 @@ func remoteDeriveKey(code, guestToken string) []byte {
 
 // remoteCanonical — то, что подписывается. Разделитель "|" безопасен: id —
 // hex, kind — из фиксированного набора, ts — число, args — JSON.
-func remoteCanonical(id, kind string, args json.RawMessage, ts int64) string {
-	return fmt.Sprintf("%s|%s|%s|%d", id, kind, string(args), ts)
+func remoteCanonical(id, kind string, args json.RawMessage, ts int64, approved bool) string {
+	return fmt.Sprintf("%s|%s|%s|%d|%t", id, kind, string(args), ts, approved)
 }
 
-func remoteSign(key []byte, id, kind string, args json.RawMessage, ts int64) string {
+func remoteSign(key []byte, id, kind string, args json.RawMessage, ts int64, approved bool) string {
 	mac := hmac.New(sha256.New, key)
-	mac.Write([]byte(remoteCanonical(id, kind, args, ts)))
+	mac.Write([]byte(remoteCanonical(id, kind, args, ts, approved)))
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
 // remoteVerify — проверка подписи на госте. hmac.Equal, а не ==: сравнение
 // побайтовое и без раннего выхода.
+// remoteVerify — проверка подписи на госте. Approved входит в подпись: иначе
+// реле могло бы «дописать» подтверждение к чужой команде.
 func remoteVerify(key []byte, c remoteCmd) bool {
-	want := remoteSign(key, c.ID, c.Kind, c.Args, c.TS)
+	want := remoteSign(key, c.ID, c.Kind, c.Args, c.TS, c.Approved)
 	return hmac.Equal([]byte(want), []byte(c.Sig))
 }
 

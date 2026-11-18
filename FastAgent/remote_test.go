@@ -1,8 +1,8 @@
-// remote_test.go — проверки удалённой диагностики (этап R1).
+// remote_test.go — проверки удалённой диагностики (R1–R2).
 //
 // Тестируется то, что легко и дорого проверить вживую: подпись (и её подделка),
-// полный протокол брокера, файл-билет, отказ на всё, кроме чтения, и разбор
-// строк консоли. Живой прогон «два процесса через сеть» — в FIELD-TEST.md.
+// полный протокол брокера, файл-билет, граница «чтение/изменение» на госте и
+// разбор строк консоли. Живой прогон «два процесса через сеть» — в FIELD-TEST.md.
 package main
 
 import (
@@ -30,13 +30,25 @@ func newTestBroker(t *testing.T, secret, ticket string) (*remoteBroker, *httptes
 func TestRemoteSignRoundTrip(t *testing.T) {
 	key := remoteDeriveKey("a1b2c3", "deadbeef")
 	args := json.RawMessage(`{"path":"C:\\Windows\\win.ini"}`)
-	sig := remoteSign(key, "cafe", "read_file", args, 1700000000)
+	sig := remoteSign(key, "cafe", "read_file", args, 1700000000, false)
 	if sig == "" || len(sig) != 64 {
 		t.Fatalf("подпись не 64 hex: %q", sig)
 	}
 	cmd := remoteCmd{ID: "cafe", Kind: "read_file", Args: args, Sig: sig, TS: 1700000000}
 	if !remoteVerify(key, cmd) {
 		t.Fatal("своя же подпись не прошла проверку")
+	}
+	// Approved входит в подпись: иначе реле «дописало» бы подтверждение к
+	// чужой команде. Флаг true с подписью от false обязан не сойтись.
+	signedFalse := remoteSign(key, "cafe", "run", args, 1700000000, false)
+	withApproval := remoteCmd{ID: "cafe", Kind: "run", Args: args, Sig: signedFalse, TS: 1700000000, Approved: true}
+	if remoteVerify(key, withApproval) {
+		t.Fatal("подпись сошлась после подмены approved")
+	}
+	signedTrue := remoteSign(key, "cafe", "run", args, 1700000000, true)
+	withApproval.Sig = signedTrue
+	if !remoteVerify(key, withApproval) {
+		t.Fatal("подпись с approved=true не прошла проверку")
 	}
 	// Подмена аргумента — подпись обязана не сойтись.
 	tampered := cmd
@@ -123,7 +135,7 @@ func TestBrokerSessionLifecycle(t *testing.T) {
 	key := remoteDeriveKey(code, guest)
 	args := json.RawMessage(`{"path":"/etc/hostname"}`)
 	cmd := remoteCmd{ID: "beef", Kind: "read_file", Args: args, TS: time.Now().Unix()}
-	cmd.Sig = remoteSign(key, cmd.ID, cmd.Kind, cmd.Args, cmd.TS)
+	cmd.Sig = remoteSign(key, cmd.ID, cmd.Kind, cmd.Args, cmd.TS, cmd.Approved)
 	body, _ := json.Marshal(map[string]any{"code": code, "cmd": cmd})
 	if err := remoteJSON(http.MethodPost, base+"/fa/cmd", "s3cret", body, nil); err != nil {
 		t.Fatalf("команда не поставлена: %v", err)
@@ -326,7 +338,7 @@ func TestBrokerExpiryAndClose(t *testing.T) {
 	}
 }
 
-func TestRemoteExecOnlyRead(t *testing.T) {
+func TestRemoteExecPolicyOnGuest(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "hosts.txt")
 	if err := os.WriteFile(file, []byte("127.0.0.1 localhost\n"), 0o644); err != nil {
@@ -337,33 +349,57 @@ func TestRemoteExecOnlyRead(t *testing.T) {
 		return b
 	}
 
-	// Чтение разрешено.
-	out, rc, ok := remoteExec(remoteCmd{Kind: "read_file", Args: raw(map[string]any{"path": file})})
-	if !ok || rc != 0 || !strings.Contains(out, "localhost") {
-		t.Fatalf("read_file: ok=%v rc=%d out=%q", ok, rc, out)
+	// Чтение разрешено без подтверждения.
+	res := remoteExec(remoteCmd{Kind: "read_file", Args: raw(map[string]any{"path": file})})
+	if !res.ok || res.exit != 0 || !strings.Contains(res.out, "localhost") {
+		t.Fatalf("read_file: ok=%v rc=%d out=%q", res.ok, res.exit, res.out)
 	}
 
-	// Запись запрещена: R1 — только чтение, и отказ приходит от политики.
-	if out, _, ok := remoteExec(remoteCmd{Kind: "write_file", Args: raw(map[string]any{"path": file, "content": "x"})}); ok || !strings.Contains(out, "только чтение") {
-		t.Fatalf("write_file не отклонён: ok=%v out=%q", ok, out)
-	}
-
-	// Произвольная команда тоже запрещена.
-	if out, _, ok := remoteExec(remoteCmd{Kind: "run", Args: raw(map[string]any{"command": "id"})}); ok || !strings.Contains(out, "только чтение") {
-		t.Fatalf("run не отклонён: ok=%v out=%q", ok, out)
+	// Инструмент изменения без approved не выполняется — и не «ждёт», а
+	// отклоняется: подтверждение в R2 есть только у run.
+	if res := remoteExec(remoteCmd{Kind: "write_file", Args: raw(map[string]any{"path": file, "content": "x"})}); res.ok || !strings.Contains(res.out, "только чтение") {
+		t.Fatalf("write_file не отклонён: ok=%v out=%q", res.ok, res.out)
 	}
 
 	// Секретный файл не читается даже как read_file.
 	secret := filepath.Join(dir, "id_rsa")
 	_ = os.WriteFile(secret, []byte("-----BEGIN"), 0o600)
-	if out, _, ok := remoteExec(remoteCmd{Kind: "read_file", Args: raw(map[string]any{"path": secret})}); ok || !strings.Contains(out, "секрет") {
-		t.Fatalf("секрет прочитан через remote: ok=%v out=%q", ok, out)
+	if res := remoteExec(remoteCmd{Kind: "read_file", Args: raw(map[string]any{"path": secret})}); res.ok || !strings.Contains(res.out, "секрет") {
+		t.Fatalf("секрет прочитан через remote: ok=%v out=%q", res.ok, res.out)
+	}
+
+	// R2: run на уровне гостя L2.
+	prev := currentLevel
+	currentLevel = L2Fix
+	t.Cleanup(func() { currentLevel = prev })
+
+	// Чтение через run — без вопросов.
+	if res := remoteExec(remoteCmd{Kind: "run", Args: raw(map[string]any{"command": "id"})}); !res.ok || strings.TrimSpace(res.out) == "" {
+		t.Fatalf("run id: ok=%v out=%q", res.ok, res.out)
+	}
+
+	// Изменение — сначала «нужно подтверждение», и только так.
+	need := remoteExec(remoteCmd{Kind: "run", Args: raw(map[string]any{"command": "ipconfig /flushdns"})})
+	if !need.needsApproval || need.ok || need.verdict == "" {
+		t.Fatalf("изменение не попросило подтверждения: %+v", need)
+	}
+	done := remoteExec(remoteCmd{Kind: "run", Approved: true, Args: raw(map[string]any{"command": "ipconfig /flushdns"})})
+	if !done.ok || done.needsApproval {
+		t.Fatalf("изменение с approved не выполнено: %+v", done)
+	}
+
+	// Опасное удалённо не выполняется даже с approved: L3 в этом режиме нет.
+	for _, cmd := range []string{"rm -rf /", "format C:"} {
+		res := remoteExec(remoteCmd{Kind: "run", Approved: true, Args: raw(map[string]any{"command": cmd})})
+		if res.ok || !strings.Contains(res.out, "не выполняется") {
+			t.Fatalf("%q выполнен удалённо: %+v", cmd, res)
+		}
 	}
 
 	// Снимок диагностики собирается тем же read-only путём.
-	out, rc, ok = remoteExec(remoteCmd{Kind: "diag"})
-	if !ok || rc != 0 || strings.TrimSpace(out) == "" {
-		t.Fatalf("diag: ok=%v rc=%d out=%q", ok, rc, out)
+	res = remoteExec(remoteCmd{Kind: "diag"})
+	if !res.ok || res.exit != 0 || strings.TrimSpace(res.out) == "" {
+		t.Fatalf("diag: ok=%v rc=%d out=%q", res.ok, res.exit, res.out)
 	}
 }
 
@@ -379,6 +415,8 @@ func TestParseRemoteCommand(t *testing.T) {
 		{`read "C:\Program Files\app.ini"`, "read_file", false, map[string]string{"path": `C:\Program Files\app.ini`}},
 		{`grep ошибка C:\Windows *.log`, "grep_search", false, map[string]string{"pattern": "ошибка", "path": `C:\Windows`, "glob": "*.log"}},
 		{`glob *.ini C:\`, "file_glob_search", false, map[string]string{"pattern": "*.ini", "path": `C:\`}},
+		{`run ipconfig /flushdns`, "run", false, map[string]string{"command": "ipconfig /flushdns"}},
+		{`run "C:\Program Files\x.exe" --flag`, "run", false, map[string]string{"command": `"C:\Program Files\x.exe" --flag`}},
 		{"help", "", false, nil},
 		{"quit", "close", true, nil},
 	}
@@ -405,7 +443,7 @@ func TestParseRemoteCommand(t *testing.T) {
 		}
 	}
 
-	for _, bad := range []string{"read", "grep", "glob", "run dir", `read "незакрытая`} {
+	for _, bad := range []string{"read", "grep", "glob", "run", `read "незакрытая`} {
 		if _, _, _, err := parseRemoteCommand(bad); err == nil {
 			t.Errorf("%q: ожидалась ошибка", bad)
 		}

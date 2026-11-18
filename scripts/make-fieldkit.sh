@@ -41,7 +41,8 @@ cp -f "$ROOT/README.md"                    "$KIT/README.md"
 cp -f "$FA/README.md"                      "$KIT/FastAgent-README.md"
 cp -f "$FA/FIELD-TEST.md"                  "$KIT/FIELD-TEST.md"
 cp -f "$ROOT/RUN-FIELD-TEST.txt"           "$KIT/RUN-FIELD-TEST.txt"
-echo "[+] README.md, FastAgent-README.md, FIELD-TEST.md, RUN-FIELD-TEST.txt"
+cp -f "$ROOT/RUN-REMOTE-TEST.txt"          "$KIT/RUN-REMOTE-TEST.txt"
+echo "[+] README.md, FastAgent-README.md, FIELD-TEST.md, RUN-FIELD-TEST.txt, RUN-REMOTE-TEST.txt"
 
 # --- тесты и прогонщик ---
 cp -f "$ROOT"/tests/field-*.txt "$KIT/tests/"
@@ -71,7 +72,7 @@ cat > "$KIT/README-FIRST.txt" <<EOF
 
 ЧТО ДОЛЖНО БЫТЬ (кратко)
 ------------------------
-- [policy]   26/26 OK
+- [policy]   30/30 OK
 - [selftest] три блока 6/6 OK (L0, L2, L3)
 - L1-tools:  [tool] read_file / file_glob_search / grep_search → OK, без y/n
 - L2-tools:  write_file → y → «записано N байт»; n → «оператор отказался»;
@@ -84,7 +85,8 @@ cat > "$KIT/README-FIRST.txt" <<EOF
 
 ПОДРОБНО
 --------
-RUN-FIELD-TEST.txt (этот комплект) и FIELD-TEST.md (полный чек-лист).
+RUN-FIELD-TEST.txt (полевой тест на Windows) и FIELD-TEST.md (полный чек-лист).
+Удалённая диагностика R1–R4: RUN-REMOTE-TEST.txt (гость звонит на брокер pi5).
 Разбор сессий: FastAgent-README.md.
 
 СОСТАВ
@@ -103,7 +105,7 @@ echo "[+] README-FIRST.txt"
 (
   cd "$KIT"
   sha256sum fastagent.exe config.fast.example.json README.md FastAgent-README.md \
-            FIELD-TEST.md RUN-FIELD-TEST.txt README-FIRST.txt tests/*.txt \
+            FIELD-TEST.md RUN-FIELD-TEST.txt RUN-REMOTE-TEST.txt README-FIRST.txt tests/*.txt \
             scripts/field-test-fastagent.bat > SHA256SUMS.txt 2>/dev/null || true
   [[ -f fastagent-linux-arm64 ]] && sha256sum fastagent-linux-arm64 >> SHA256SUMS.txt
   [[ -f fastagent-linux-amd64 ]] && sha256sum fastagent-linux-amd64 >> SHA256SUMS.txt

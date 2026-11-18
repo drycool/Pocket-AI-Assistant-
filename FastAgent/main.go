@@ -1142,6 +1142,14 @@ func main() {
 	}
 	currentLevel = cfg.AccessLevel
 
+	// Файл-билет: имя fastagent-<код>.exe — это уже команда «я гость». Без
+	// этого обещанный двойной щёлчок по билету открывал обычный агент, и связь
+	// не поднималась (дефект живого прогона R3 18.11.2026).
+	if !*linkFlag && *remoteFlag == "" && !*brokerFlag && !*serveFlag &&
+		!*policyFlag && !*selfTestFlag && !*diagFlag && remoteCodeFromExe(os.Args[0]) != "" {
+		*linkFlag = true
+		fmt.Println("[i] Имя файла содержит код сессии — режим гостя (-link).")
+	}
 	if *brokerFlag {
 		// Брокер — это реле: модель и ключи не нужны, конфиг тоже.
 		ensureUTF8Console()

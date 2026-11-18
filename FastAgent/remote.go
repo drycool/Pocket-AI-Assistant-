@@ -1,13 +1,15 @@
-// remote.go — удалённая диагностика, этап R1 (см. REMOTE-DIAG.md).
+// remote.go — удалённая диагностика, этапы R1–R3 (см. REMOTE-DIAG.md).
 //
 // Инверсия направления: на гостевой ПК попадает ОДИН exe, он сам звонит на
 // брокер (pi5), а оператор работает в своём терминале. Здесь — общая часть:
 // типы, HMAC-подпись команд и брокер (реле), который не знает ключа подписи
 // и поэтому не может подделать команду.
 //
-// Границы R1: только чтение — diag, read_file, grep_search, file_glob_search.
-// write_file и run в R1 не выполняются: на госте любой другой kind отклоняется
-// политикой (classifyTool), а не «обещанием» оператора.
+// R1 — чтение: diag, read_file, grep_search, file_glob_search.
+// R2 — run: команда исполняется только после y/n у оператора (поле approved).
+// R3 — передача файлов: get_file/put_file кусками по 256 КиБ, лимит 50 МиБ.
+// put_file — запись, поэтому идёт тем же путём, что run: сначала гость отвечает
+// «нужно подтверждение», потом оператор говорит y, потом куски идут с approved.
 package main
 
 import (
@@ -28,8 +30,17 @@ const (
 	remoteCodeLen       = 6
 	remotePollMaxWait   = 50 * time.Second
 	remotePollDefault   = 25 * time.Second
-	remoteMaxResultSize = 64 << 10 // 64 КБ на результат: этого хватает на вывод команд
+	remoteMaxResultSize = 64 << 10 // 64 КБ на вывод команды: тексту больше не нужно
 	remoteEventsBuffer  = 32
+
+	// R3: передача файлов. Кусок 256 КиБ — это ~350 КиБ base64, то есть один
+	// результат спокойно проходит через SSE и ограничение тела ответа; файл
+	// в 50 МиБ — это 200 таких кусков, минута-две на медленном канале.
+	remoteChunkSize     = 256 << 10
+	remoteMaxFileSize   = 50 << 20
+	remoteMaxDataB64    = remoteChunkSize*4/3 + 64 // base64 от одного куска
+	remoteMaxResultJSON = 1 << 20                  // JSON результата целиком
+	remoteMaxResults    = 256                      // сколько результатов держим в сессии
 )
 
 // Сроки — переменные, а не константы: тесты подменяют их короткими.
@@ -72,6 +83,16 @@ type remoteResult struct {
 	// оператора; Verdict объясняет, что именно он подтверждает.
 	NeedsApproval bool   `json:"needs_approval,omitempty"`
 	Verdict       string `json:"verdict,omitempty"`
+
+	// R3: кусок файла. Data — base64, а не текст, поэтому Out для него не
+	// используется: truncate() режет середину и испортил бы данные.
+	Data   string `json:"data,omitempty"`
+	Offset int64  `json:"offset,omitempty"` // с какой позиции этот кусок
+	Total  int64  `json:"total,omitempty"`  // полный размер файла
+	EOF    bool   `json:"eof,omitempty"`    // кусок последний
+	// SHA256 — хеш файла целиком: гость присылает его в первом куске get,
+	// оператор — в каждом куске put. Сверка ловит обрыв и подмену по дороге.
+	SHA256 string `json:"sha256,omitempty"`
 }
 
 // remoteEvent — то, что брокер отдаёт оператору по SSE.
@@ -434,13 +455,27 @@ func (b *remoteBroker) handleResult(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var res remoteResult
-	if err := decodeJSON(r, &res, remoteMaxResultSize*2); err != nil {
+	if err := decodeJSON(r, &res, remoteMaxResultJSON); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "битый JSON результата"})
+		return
+	}
+	if len(res.Data) > remoteMaxDataB64 {
+		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "кусок больше лимита передачи"})
 		return
 	}
 	res.Out = truncate(res.Out, remoteMaxResultSize)
 	s.mu.Lock()
-	s.results[res.ID] = res
+	// В карте результатов данные куска не нужны: оператор получает их
+	// событием SSE. Держим только хвост и без Data — иначе передача файла
+	// оставляла бы в памяти брокера копию всего файла.
+	trail := res
+	trail.Data = ""
+	s.results[res.ID] = trail
+	if len(s.results) > remoteMaxResults {
+		// Карту не читает ни одна ручка (это след для /fa/status на будущее),
+		// поэтому при переполнении честно чистим её, а не растём без границ.
+		s.results = map[string]remoteResult{}
+	}
 	s.lastSeen = b.now()
 	s.mu.Unlock()
 	s.pushEvent(remoteEvent{Type: "result", Result: &res})
@@ -608,7 +643,7 @@ func runBroker(addr, secret, ticket string) int {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	fmt.Println("===================================================")
-	fmt.Println("        FASTAGENT — брокер удалённой диагностики (R1)")
+	fmt.Println("        FASTAGENT — брокер удалённой диагностики (R1–R3)")
 	fmt.Println("===================================================")
 	fmt.Printf("Слушаю: http://%s/fa/*\n", addr)
 	if secret == "" {
@@ -616,7 +651,7 @@ func runBroker(addr, secret, ticket string) int {
 	} else {
 		fmt.Println("[i] Оператор: Authorization: Bearer <broker-secret>.")
 	}
-	fmt.Println("[i] Гость: -link, только чтение (diag/read_file/grep_search/file_glob_search).")
+	fmt.Println("[i] Гость: -link; чтение, run с подтверждением, передача файлов (get/put, до 50 МиБ).")
 	if err := srv.ListenAndServe(); err != nil {
 		fmt.Printf("[ERROR] брокер: %v\n", err)
 		return 1

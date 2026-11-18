@@ -8,6 +8,9 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -206,6 +209,9 @@ func TestBrokerSSEEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("сессия: %v", err)
 	}
+	// Закрываем живые соединения до httptest.Close: SSE-поток и длинный поллинг
+	// иначе держат сервер до клиентского таймаута (45 с).
+	t.Cleanup(srv.CloseClientConnections)
 	guest, err := linkPair(srv.URL, code)
 	if err != nil {
 		t.Fatalf("пара: %v", err)
@@ -417,6 +423,9 @@ func TestParseRemoteCommand(t *testing.T) {
 		{`glob *.ini C:\`, "file_glob_search", false, map[string]string{"pattern": "*.ini", "path": `C:\`}},
 		{`run ipconfig /flushdns`, "run", false, map[string]string{"command": "ipconfig /flushdns"}},
 		{`run "C:\Program Files\x.exe" --flag`, "run", false, map[string]string{"command": `"C:\Program Files\x.exe" --flag`}},
+		{`get C:\Windows\win.ini /tmp/win.ini`, "get_file", false, map[string]string{"path": `C:\Windows\win.ini`, "local": "/tmp/win.ini"}},
+		{`get "C:\Program Files\app.ini"`, "get_file", false, map[string]string{"path": `C:\Program Files\app.ini`}},
+		{`put /tmp/up.bin C:\Users\Public\up.bin`, "put_file", false, map[string]string{"local": "/tmp/up.bin", "path": `C:\Users\Public\up.bin`}},
 		{"help", "", false, nil},
 		{"quit", "close", true, nil},
 	}
@@ -443,7 +452,7 @@ func TestParseRemoteCommand(t *testing.T) {
 		}
 	}
 
-	for _, bad := range []string{"read", "grep", "glob", "run", `read "незакрытая`} {
+	for _, bad := range []string{"read", "grep", "glob", "run", "get", "put", `read "незакрытая`} {
 		if _, _, _, err := parseRemoteCommand(bad); err == nil {
 			t.Errorf("%q: ожидалась ошибка", bad)
 		}
@@ -466,5 +475,303 @@ func TestSplitQuoted(t *testing.T) {
 	}
 	if _, err := splitQuoted(`"abc`); err == nil {
 		t.Fatal("незакрытая кавычка не замечена")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// R3: передача файлов
+// ---------------------------------------------------------------------------
+
+func remoteRawArgs(v any) json.RawMessage {
+	b, _ := json.Marshal(v)
+	return b
+}
+
+// startTestGuest — гостевая петля «поллинг → политика → результат», как в
+// настоящем -link, но без сети наружу: всё идёт через httptest-брокер.
+func startTestGuest(t *testing.T, base, guest string) {
+	t.Helper()
+	done := make(chan struct{})
+	t.Cleanup(func() { close(done) })
+	go func() {
+		for {
+			select {
+			case <-done:
+				return
+			default:
+			}
+			cmd, err := linkPoll(base, guest)
+			if err != nil {
+				return
+			}
+			if cmd == nil {
+				continue
+			}
+			out := remoteExec(*cmd)
+			_ = linkResult(base, guest, remoteResult{
+				ID:            cmd.ID,
+				OK:            out.ok,
+				Out:           out.out,
+				Exit:          out.exit,
+				NeedsApproval: out.needsApproval,
+				Verdict:       out.verdict,
+				Data:          out.data,
+				Offset:        out.offset,
+				Total:         out.total,
+				EOF:           out.eof,
+				SHA256:        out.sha,
+			})
+		}
+	}()
+}
+
+func testPayload(n int) []byte {
+	data := make([]byte, n)
+	for i := range data {
+		data[i] = byte(i*31 + 7)
+	}
+	return data
+}
+
+func TestRemoteGetFileChunks(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "data.bin")
+	data := testPayload(remoteChunkSize*2 + 123)
+	if err := os.WriteFile(src, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var got []byte
+	var offset int64
+	for {
+		res := remoteExec(remoteCmd{Kind: "get_file", Args: remoteRawArgs(map[string]any{"path": src, "offset": offset})})
+		if !res.ok {
+			t.Fatalf("get_file offset=%d: %s", offset, res.out)
+		}
+		if res.total != int64(len(data)) {
+			t.Fatalf("total=%d, ждали %d", res.total, len(data))
+		}
+		if res.offset != offset {
+			t.Fatalf("offset=%d, ждали %d", res.offset, offset)
+		}
+		chunk, err := base64.StdEncoding.DecodeString(res.data)
+		if err != nil {
+			t.Fatalf("кусок не base64: %v", err)
+		}
+		got = append(got, chunk...)
+		offset += int64(len(chunk))
+		if res.eof {
+			break
+		}
+		if len(chunk) != remoteChunkSize {
+			t.Fatalf("неполный кусок без eof: %d", len(chunk))
+		}
+	}
+	if !bytes.Equal(got, data) {
+		t.Fatal("собранный файл не совпал с исходным")
+	}
+
+	// Хеш присылается в первом куске и совпадает с sha256 файла.
+	first := remoteExec(remoteCmd{Kind: "get_file", Args: remoteRawArgs(map[string]any{"path": src})})
+	sum := sha256.Sum256(data)
+	if first.sha != hex.EncodeToString(sum[:]) {
+		t.Fatalf("sha256 в первом куске: %q", first.sha)
+	}
+
+	// offset за концом файла — отказ, а не пустой ответ.
+	if res := remoteExec(remoteCmd{Kind: "get_file", Args: remoteRawArgs(map[string]any{"path": src, "offset": int64(len(data)) + 1})}); res.ok {
+		t.Fatal("offset за концом файла принят")
+	}
+	// Каталог не передаётся.
+	if res := remoteExec(remoteCmd{Kind: "get_file", Args: remoteRawArgs(map[string]any{"path": dir})}); res.ok {
+		t.Fatal("каталог отдан как файл")
+	}
+	// Секрет не передаётся.
+	secret := filepath.Join(dir, "id_rsa")
+	if err := os.WriteFile(secret, []byte("key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if res := remoteExec(remoteCmd{Kind: "get_file", Args: remoteRawArgs(map[string]any{"path": secret})}); res.ok {
+		t.Fatal("секрет передан удалённо")
+	}
+	// Файл больше лимита — отказ по Stat, без чтения.
+	big := filepath.Join(dir, "big.bin")
+	f, err := os.Create(big)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(remoteMaxFileSize + 1); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	if res := remoteExec(remoteCmd{Kind: "get_file", Args: remoteRawArgs(map[string]any{"path": big})}); res.ok {
+		t.Fatal("файл больше лимита передан")
+	}
+}
+
+func TestRemotePutFileApprovalAndChecks(t *testing.T) {
+	dir := t.TempDir()
+	data := testPayload(remoteChunkSize + 42)
+	sum := sha256.Sum256(data)
+
+	prev := currentLevel
+	currentLevel = L2Fix
+	t.Cleanup(func() { currentLevel = prev })
+
+	target := filepath.Join(dir, "incoming.bin")
+	args := func(off int64, approved bool) remoteCmd {
+		chunk := data[off:]
+		if int64(len(chunk)) > remoteChunkSize {
+			chunk = chunk[:remoteChunkSize]
+		}
+		return remoteCmd{
+			Kind:     "put_file",
+			Approved: approved,
+			Args: remoteRawArgs(map[string]any{
+				"path":   target,
+				"offset": off,
+				"total":  len(data),
+				"data":   base64.StdEncoding.EncodeToString(chunk),
+				"final":  off+int64(len(chunk)) == int64(len(data)),
+				"sha256": hex.EncodeToString(sum[:]),
+			}),
+		}
+	}
+
+	// Без approved не пишется ничего, даже временного файла.
+	if res := remoteExec(args(0, false)); !res.needsApproval || res.ok {
+		t.Fatalf("без approved: needsApproval=%v ok=%v", res.needsApproval, res.ok)
+	}
+	if _, err := os.Stat(target); err == nil {
+		t.Fatal("файл создан без подтверждения")
+	}
+	if _, err := os.Stat(target + ".part-fastagent"); err == nil {
+		t.Fatal("временный файл создан без подтверждения")
+	}
+
+	// С approved куски пишутся, в конце файл появляется под настоящим именем.
+	var offset int64
+	for {
+		res := remoteExec(args(offset, true))
+		if !res.ok {
+			t.Fatalf("put approved offset=%d: %s", offset, res.out)
+		}
+		chunkLen := int64(len(data)) - offset
+		if chunkLen > remoteChunkSize {
+			chunkLen = remoteChunkSize
+		}
+		offset += chunkLen
+		if offset >= int64(len(data)) {
+			break
+		}
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("файл не записан: %v", err)
+	}
+	if !bytes.Equal(got, data) {
+		t.Fatal("записанный файл не совпал")
+	}
+
+	// Неверный sha256 — файл не появляется под настоящим именем, .part удалён.
+	target2 := filepath.Join(dir, "bad.bin")
+	badArgs := map[string]any{
+		"path": target2, "offset": 0, "total": 3,
+		"data":  base64.StdEncoding.EncodeToString([]byte("abc")),
+		"final": true, "sha256": strings.Repeat("0", 64),
+	}
+	if res := remoteExec(remoteCmd{Kind: "put_file", Approved: true, Args: remoteRawArgs(badArgs)}); res.ok {
+		t.Fatal("файл записан с неверным sha256")
+	}
+	if _, err := os.Stat(target2); err == nil {
+		t.Fatal("файл с неверным хешем остался под настоящим именем")
+	}
+
+	// Системный каталог и секреты — отказ даже с approved.
+	for _, p := range []string{"/etc/fastagent-test", filepath.Join(dir, "id_rsa")} {
+		res := remoteExec(remoteCmd{Kind: "put_file", Approved: true, Args: remoteRawArgs(map[string]any{
+			"path": p, "offset": 0, "total": 1, "data": "eA==", "final": true, "sha256": "x",
+		})})
+		if res.ok {
+			t.Fatalf("%s: запись разрешена", p)
+		}
+	}
+
+	// Объявленный размер больше лимита — отказ до записи.
+	bigArgs := map[string]any{
+		"path": filepath.Join(dir, "big2.bin"), "offset": 0,
+		"total": remoteMaxFileSize + 1, "data": "", "final": true, "sha256": "",
+	}
+	if res := remoteExec(remoteCmd{Kind: "put_file", Approved: true, Args: remoteRawArgs(bigArgs)}); res.ok {
+		t.Fatal("принят объявленный размер больше лимита")
+	}
+}
+
+func TestRemoteFileTransferThroughBroker(t *testing.T) {
+	_, srv := newTestBroker(t, "s3cret", "")
+	code, _, err := remoteCreateSession(srv.URL, "s3cret")
+	if err != nil {
+		t.Fatalf("сессия: %v", err)
+	}
+	// Закрываем живые соединения до httptest.Close: SSE-поток и длинный поллинг
+	// иначе держат сервер до клиентского таймаута (45 с).
+	t.Cleanup(srv.CloseClientConnections)
+	guest, err := linkPair(srv.URL, code)
+	if err != nil {
+		t.Fatalf("пара: %v", err)
+	}
+	key := remoteDeriveKey(code, guest)
+
+	prev := currentLevel
+	currentLevel = L2Fix
+	t.Cleanup(func() { currentLevel = prev })
+
+	events := make(chan remoteEvent, 16)
+	go remoteListenEvents(srv.URL, code, "s3cret", events)
+	startTestGuest(t, srv.URL, guest)
+
+	dir := t.TempDir()
+	data := testPayload(remoteChunkSize*2 + 17)
+	src := filepath.Join(dir, "источник.bin")
+	if err := os.WriteFile(src, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// get: файл реально проходит брокер кусками и сверяется по sha256.
+	dst := filepath.Join(dir, "копия.bin")
+	if err := remoteGetFile(srv.URL, "s3cret", code, key, src, dst, events); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	got, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatalf("копия не создана: %v", err)
+	}
+	if !bytes.Equal(got, data) {
+		t.Fatal("полученная копия не совпала")
+	}
+
+	// put: подтверждение y в «терминале оператора», файл у «гостя» появляется.
+	remoteDst := filepath.Join(dir, "наверх.bin")
+	reader := bufio.NewReader(strings.NewReader("y\n"))
+	res, ok := remotePutFile(reader, srv.URL, "s3cret", code, key, src, remoteDst, events)
+	if !ok || !res.OK {
+		t.Fatalf("put: ok=%v res=%+v", ok, res)
+	}
+	up, err := os.ReadFile(remoteDst)
+	if err != nil {
+		t.Fatalf("файл не записан на госте: %v", err)
+	}
+	if !bytes.Equal(up, data) {
+		t.Fatal("записанный на госте файл не совпал")
+	}
+
+	// Отказ оператора — файла нет (и это не ошибка транспорта).
+	refuseDst := filepath.Join(dir, "отказ.bin")
+	res, ok = remotePutFile(bufio.NewReader(strings.NewReader("n\n")), srv.URL, "s3cret", code, key, src, refuseDst, events)
+	if !ok || res.OK {
+		t.Fatalf("put без подтверждения: ok=%v res=%+v", ok, res)
+	}
+	if _, err := os.Stat(refuseDst); err == nil {
+		t.Fatal("файл записан после отказа оператора")
 	}
 }

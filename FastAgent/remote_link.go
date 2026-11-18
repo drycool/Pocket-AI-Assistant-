@@ -1,16 +1,21 @@
-// remote_link.go — гостевая сторона удалённой диагностики (этап R1).
+// remote_link.go — гостевая сторона удалённой диагностики (этапы R1–R3).
 //
 // На гостевом ПК запускается один exe; код сессии берётся из ИМЕНИ файла
 // (fastagent-a1b2c3.exe), поэтому на чужой клавиатуре не набирается ничего.
 // Гость звонит наружу, длинно поллит команды, проверяет подпись и исполняет
-// R1 (чтение: diag, read_file, grep_search, file_glob_search) и R2 (`run` —
-// только после подтверждения оператора). L3 удалённо не разрешён: уровень
-// гостя в этом режиме — L2, опасное и «вне белого списка» отклоняется.
+// R1 (чтение: diag, read_file, grep_search, file_glob_search), R2 (`run` —
+// только после подтверждения оператора) и R3 (get_file/put_file кусками).
+// L3 удалённо не разрешён: уровень гостя в этом режиме — L2, опасное и
+// «вне белого списка» отклоняется. Запись файла (put_file) — тоже L2, то есть
+// только с подтверждением оператора; куски без approved не пишутся вообще.
 package main
 
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -79,11 +84,12 @@ func runLink(cfg Config, brokerURL string) int {
 		fmt.Println("[i] Удалённый режим: уровень L2 — L3 удалённо не разрешён.")
 	}
 	fmt.Println("===================================================")
-	fmt.Println("        FASTAGENT — гость удалённой диагностики (R2)")
+	fmt.Println("        FASTAGENT — гость удалённой диагностики (R1–R3)")
 	fmt.Println("===================================================")
 	fmt.Printf("Сессия: %s | брокер: %s\n", code, base)
 	fmt.Println("[i] Связь установлена. Жду команды оператора: чтение всегда,")
-	fmt.Println("    run — только после подтверждения у оператора. Ctrl+C — выйти.")
+	fmt.Println("    run и запись файла — только после подтверждения у оператора.")
+	fmt.Println("    Ctrl+C — выйти.")
 	logRemoteAction("link-start", VReadOnly, true, "code="+code)
 
 	backoff := time.Second
@@ -122,6 +128,11 @@ func runLink(cfg Config, brokerURL string) int {
 			MS:            time.Since(start).Milliseconds(),
 			NeedsApproval: out.needsApproval,
 			Verdict:       out.verdict,
+			Data:          out.data,
+			Offset:        out.offset,
+			Total:         out.total,
+			EOF:           out.eof,
+			SHA256:        out.sha,
 		}
 		if err := linkResult(base, guest, res); err != nil {
 			fmt.Printf("[link] результат не отправлен: %v\n", err)
@@ -139,6 +150,14 @@ type execOutcome struct {
 	ok            bool
 	needsApproval bool
 	verdict       string
+
+	// R3: кусок файла. data — base64, отдельно от out: out режется truncate
+	// и содержит человекочитаемую строку о том, что именно передано.
+	data   string
+	offset int64
+	total  int64
+	eof    bool
+	sha    string
 }
 
 // remoteExec — исполнение команды НА ГОСТЕ. Политика проверяется здесь, а не
@@ -165,9 +184,15 @@ func remoteExec(c remoteCmd) execOutcome {
 	if c.Kind == "run" {
 		return remoteExecRun(c, args)
 	}
+	if c.Kind == "get_file" {
+		return remoteExecGet(args)
+	}
+	if c.Kind == "put_file" {
+		return remoteExecPut(c, args)
+	}
 	verdict := classifyTool(c.Kind, L1Read)
 	if verdict != VReadOnly && !c.Approved {
-		msg := fmt.Sprintf("R1: инструмент %q недоступен удалённо — только чтение", c.Kind)
+		msg := fmt.Sprintf("R3: инструмент %q удалённо недоступен (только чтение)", c.Kind)
 		logRemoteAction("tool:"+c.Kind, verdict, false, msg)
 		return execOutcome{out: msg, exit: -1, verdict: verdict.String()}
 	}
@@ -224,6 +249,262 @@ func remoteExecRun(c remoteCmd, args map[string]any) execOutcome {
 		ok:      true,
 		verdict: verdict.String(),
 	}
+}
+
+// ---------------------------------------------------------------------------
+// R3: передача файлов кусками
+// ---------------------------------------------------------------------------
+
+// remoteExecGet — отдать один кусок файла (чтение). Проходит те же запреты,
+// что read_file: секреты, каталоги, лимит размера. SHA256 файла целиком
+// считается при первом куске — по нему оператор проверяет собранную копию.
+func remoteExecGet(args map[string]any) execOutcome {
+	p := argString(args, "path")
+	if p == "" {
+		return execOutcome{out: "не задан path", exit: -1}
+	}
+	abs, err := toolAbsPath(p)
+	if err != nil {
+		logRemoteAction("get_file", VReadOnly, false, err.Error())
+		return execOutcome{out: err.Error(), exit: -1}
+	}
+	if isSecretPath(abs) {
+		msg := "это файл с секретами (ключи/пароли) — передача запрещена"
+		logRemoteAction("get_file "+abs, VForbidden, false, msg)
+		return execOutcome{out: msg, exit: -1, verdict: VForbidden.String()}
+	}
+	fi, err := os.Stat(abs)
+	if err != nil {
+		msg := "файл не найден: " + err.Error()
+		logRemoteAction("get_file "+abs, VReadOnly, false, msg)
+		return execOutcome{out: msg, exit: -1}
+	}
+	if fi.IsDir() {
+		msg := "это каталог; передача каталога не поддерживается"
+		logRemoteAction("get_file "+abs, VReadOnly, false, msg)
+		return execOutcome{out: msg, exit: -1}
+	}
+	if fi.Size() > remoteMaxFileSize {
+		msg := fmt.Sprintf("файл %d байт — больше лимита передачи %d байт", fi.Size(), int64(remoteMaxFileSize))
+		logRemoteAction("get_file "+abs, VReadOnly, false, msg)
+		return execOutcome{out: msg, exit: -1}
+	}
+	offset := int64(argInt(args, "offset", 0))
+	if offset < 0 || offset > fi.Size() {
+		msg := fmt.Sprintf("offset %d вне файла (размер %d)", offset, fi.Size())
+		logRemoteAction("get_file "+abs, VReadOnly, false, msg)
+		return execOutcome{out: msg, exit: -1}
+	}
+	n := int64(remoteChunkSize)
+	if fi.Size()-offset < n {
+		n = fi.Size() - offset
+	}
+	buf := make([]byte, n)
+	read := 0
+	if n > 0 {
+		f, oerr := os.Open(abs)
+		if oerr != nil {
+			msg := "чтение: " + oerr.Error()
+			logRemoteAction("get_file "+abs, VReadOnly, false, msg)
+			return execOutcome{out: msg, exit: -1}
+		}
+		read, oerr = f.ReadAt(buf, offset)
+		f.Close()
+		if oerr != nil && oerr != io.EOF {
+			msg := "чтение: " + oerr.Error()
+			logRemoteAction("get_file "+abs, VReadOnly, false, msg)
+			return execOutcome{out: msg, exit: -1}
+		}
+	}
+	sum := ""
+	if offset == 0 {
+		// Хеш не должен ломать передачу: если посчитать не удалось, оператор
+		// получит пустой sha256 и проверит размер — это честнее отказа.
+		sum, _ = remoteFileSHA256(abs)
+	}
+	out := fmt.Sprintf("%s [%d..%d] %d байт", abs, offset, offset+int64(read), fi.Size())
+	logRemoteAction("get_file "+abs, VReadOnly, true, out)
+	return execOutcome{
+		out:     out,
+		ok:      true,
+		verdict: VReadOnly.String(),
+		data:    base64.StdEncoding.EncodeToString(buf[:read]),
+		offset:  offset,
+		total:   fi.Size(),
+		eof:     offset+int64(read) >= fi.Size(),
+		sha:     sum,
+	}
+}
+
+// remoteExecPut — принять один кусок файла. Запись — изменение (L2), поэтому
+// без approved гость НИЧЕГО не пишет, а отвечает needs_approval; оператор
+// подтверждает у себя, и только потом куски идут с approved=true. В конце
+// сверяется sha256 всего файла, и только потом .part переименовывается:
+// недописанный или подменённый файл не появится под настоящим именем.
+func remoteExecPut(c remoteCmd, args map[string]any) execOutcome {
+	p := argString(args, "path")
+	if p == "" {
+		return execOutcome{out: "не задан path", exit: -1}
+	}
+	abs, err := toolAbsPath(p)
+	if err != nil {
+		logRemoteAction("put_file", VForbidden, false, err.Error())
+		return execOutcome{out: err.Error(), exit: -1}
+	}
+	if isSecretPath(abs) {
+		msg := "путь относится к секретам (ключи/пароли) — запись запрещена"
+		logRemoteAction("put_file "+abs, VForbidden, false, msg)
+		return execOutcome{out: msg, exit: -1, verdict: VForbidden.String()}
+	}
+	if isProtectedWritePath(abs) {
+		msg := "системный каталог — запись запрещена политикой"
+		logRemoteAction("put_file "+abs, VForbidden, false, msg)
+		return execOutcome{out: msg, exit: -1, verdict: VForbidden.String()}
+	}
+	total := int64(argInt(args, "total", -1))
+	if total < 0 || total > remoteMaxFileSize {
+		msg := fmt.Sprintf("объявленный размер %d байт вне лимита передачи (0…%d)", total, int64(remoteMaxFileSize))
+		logRemoteAction("put_file "+abs, VForbidden, false, msg)
+		return execOutcome{out: msg, exit: -1}
+	}
+	dir := filepath.Dir(abs)
+	if fi, derr := os.Stat(dir); derr != nil || !fi.IsDir() {
+		msg := fmt.Sprintf("каталог %s не существует — создайте его вручную", dir)
+		logRemoteAction("put_file "+abs, VForbidden, false, msg)
+		return execOutcome{out: msg, exit: -1}
+	}
+	verdict := classifyTool("write_file", currentLevel)
+	if verdict == VForbidden || verdict == VNotAllowed {
+		msg := fmt.Sprintf("запись недоступна удалённо на уровне L%d: %s", currentLevel, verdict)
+		logRemoteAction("put_file "+abs, verdict, false, msg)
+		return execOutcome{out: msg, exit: -1, verdict: verdict.String()}
+	}
+	if !c.Approved {
+		logRemoteAction("put_file "+abs, verdict, false, "ждёт подтверждения оператора")
+		return execOutcome{
+			out:           fmt.Sprintf("нужно подтверждение оператора: %s", verdict),
+			exit:          -2,
+			needsApproval: true,
+			verdict:       verdict.String(),
+		}
+	}
+	offset := int64(argInt(args, "offset", 0))
+	if offset < 0 || offset > total {
+		msg := fmt.Sprintf("offset %d вне объявленного размера %d", offset, total)
+		logRemoteAction("put_file "+abs, VForbidden, false, msg)
+		return execOutcome{out: msg, exit: -1}
+	}
+	raw, derr := base64.StdEncoding.DecodeString(argString(args, "data"))
+	if derr != nil {
+		msg := "битый base64 в куске: " + derr.Error()
+		logRemoteAction("put_file "+abs, VForbidden, false, msg)
+		return execOutcome{out: msg, exit: -1}
+	}
+	if len(raw) > remoteChunkSize {
+		msg := fmt.Sprintf("кусок %d байт больше лимита %d", len(raw), remoteChunkSize)
+		logRemoteAction("put_file "+abs, VForbidden, false, msg)
+		return execOutcome{out: msg, exit: -1}
+	}
+	if offset+int64(len(raw)) > total {
+		msg := fmt.Sprintf("кусок выходит за объявленный размер (offset %d + %d > %d)", offset, len(raw), total)
+		logRemoteAction("put_file "+abs, VForbidden, false, msg)
+		return execOutcome{out: msg, exit: -1}
+	}
+	part := abs + ".part-fastagent"
+	flags := os.O_WRONLY | os.O_CREATE
+	if offset == 0 {
+		flags |= os.O_TRUNC
+	}
+	f, oerr := os.OpenFile(part, flags, 0o644)
+	if oerr != nil {
+		msg := "запись: " + oerr.Error()
+		logRemoteAction("put_file "+abs, VForbidden, true, msg)
+		return execOutcome{out: msg, exit: -1}
+	}
+	if fi, serr := f.Stat(); serr == nil && fi.Size() != offset {
+		f.Close()
+		msg := fmt.Sprintf("ожидался offset %d, а в файле %d байт — начните передачу заново", offset, fi.Size())
+		logRemoteAction("put_file "+abs, VForbidden, true, msg)
+		return execOutcome{out: msg, exit: -1}
+	}
+	if _, werr := f.WriteAt(raw, offset); werr != nil {
+		f.Close()
+		msg := "запись: " + werr.Error()
+		logRemoteAction("put_file "+abs, VForbidden, true, msg)
+		return execOutcome{out: msg, exit: -1}
+	}
+	final := argBool(args, "final")
+	if !final {
+		if cerr := f.Close(); cerr != nil {
+			msg := "закрытие: " + cerr.Error()
+			logRemoteAction("put_file "+abs, VForbidden, true, msg)
+			return execOutcome{out: msg, exit: -1}
+		}
+		got := offset + int64(len(raw))
+		out := fmt.Sprintf("принято %d/%d байт", got, total)
+		logRemoteAction("put_file "+abs, verdict, true, out)
+		return execOutcome{out: out, ok: true, verdict: verdict.String(), offset: offset, total: total}
+	}
+	if terr := f.Truncate(total); terr != nil {
+		f.Close()
+		msg := "выравнивание размера: " + terr.Error()
+		logRemoteAction("put_file "+abs, VForbidden, true, msg)
+		return execOutcome{out: msg, exit: -1}
+	}
+	_ = f.Sync()
+	if cerr := f.Close(); cerr != nil {
+		msg := "закрытие: " + cerr.Error()
+		logRemoteAction("put_file "+abs, VForbidden, true, msg)
+		return execOutcome{out: msg, exit: -1}
+	}
+	// Сверка хеша: до неё файл лежит под временным именем, поэтому
+	// «записалось наполовину» не выглядит как успешная запись.
+	want := argString(args, "sha256")
+	got, herr := remoteFileSHA256(part)
+	if herr != nil {
+		os.Remove(part)
+		msg := "сверка хеша: " + herr.Error()
+		logRemoteAction("put_file "+abs, VForbidden, true, msg)
+		return execOutcome{out: msg, exit: -1}
+	}
+	if want == "" || !strings.EqualFold(got, want) {
+		os.Remove(part)
+		msg := fmt.Sprintf("sha256 не сошёлся (у меня %s, ждали %s) — файл не записан", got, want)
+		logRemoteAction("put_file "+abs, VForbidden, true, msg)
+		return execOutcome{out: msg, exit: -1}
+	}
+	if rerr := os.Rename(part, abs); rerr != nil {
+		os.Remove(part)
+		msg := "переименование: " + rerr.Error()
+		logRemoteAction("put_file "+abs, VForbidden, true, msg)
+		return execOutcome{out: msg, exit: -1}
+	}
+	out := fmt.Sprintf("записано %d байт в %s (sha256 %s)", total, abs, shortHex(got))
+	logRemoteAction("put_file "+abs, verdict, true, out)
+	return execOutcome{out: out, ok: true, verdict: verdict.String(), total: total, eof: true, sha: got}
+}
+
+// remoteFileSHA256 — хеш файла целиком. Читаем не больше лимита передачи:
+// хешировать файл в сотни мегабайт ради сверки незачем.
+func remoteFileSHA256(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, io.LimitReader(f, remoteMaxFileSize+1)); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// shortHex — первые 16 символов хеша для журнала и сообщений.
+func shortHex(h string) string {
+	if len(h) > 16 {
+		return h[:16] + "…"
+	}
+	return h
 }
 
 // logRemoteAction — отдельный журнал гостя: provenance=remote виден сразу,

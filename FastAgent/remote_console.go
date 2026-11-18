@@ -1,4 +1,4 @@
-// remote_console.go — консоль оператора удалённой диагностики (R1–R2).
+// remote_console.go — консоль оператора удалённой диагностики (R1–R3).
 //
 // Оператор запускает на pi5 `fastagent -remote new`: брокер создаёт пару
 // «код → сессия», рядом кладётся файл-билет fastagent-<код>.exe, который
@@ -8,6 +8,9 @@ package main
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -18,20 +21,23 @@ import (
 	"time"
 )
 
-// consoleHelp — что можно в консоли R1. Только чтение: run/write_file здесь
-// нет намеренно, их добавление — этап R2.
-const consoleHelp = `Команды консоли (R1–R2):
+// consoleHelp — что можно в консоли оператора.
+const consoleHelp = `Команды консоли (R1–R3):
   diag                                  снимок системы гостя
   read <путь>                           прочитать файл
   grep <шаблон> [каталог] [glob]        поиск по содержимому
   glob <шаблон> [каталог]               поиск файлов по имени
   run <команда>                         выполнить команду на госте (R2)
+  get <путь на госте> [локальный путь]  забрать файл (R3, до 50 МиБ)
+  put <локальный файл> <путь на госте>  положить файл (R3, до 50 МиБ)
   status | help | quit                  состояние / справка / выход
 
-run выполняет команду по политике ГОСТЯ. Изменяющая команда сначала спросит
-подтверждение ЗДЕСЬ, в вашем терминале, и только потом уйдёт на гость с
-подписанным approved=true. Опасное и «вне белого списка» удалённо не
-выполняется: L3 в удалённом режиме не разрешён.`
+run и put выполняются по политике ГОСТЯ. Изменяющая команда и запись файла
+сначала спросят подтверждение ЗДЕСЬ, в вашем терминале, и только потом уйдут
+на гость с подписанным approved=true. Опасное и «вне белого списка» удалённо
+не выполняется: L3 в удалённом режиме не разрешён. put не пишет в системные
+каталоги и в секреты; файл на госте появляется под настоящим именем только
+после сверки sha256.`
 
 // runRemote — вся операторская часть: сессия, файл-билет, ожидание гостя,
 // затем REPL или одна команда (-remote-cmd).
@@ -44,7 +50,7 @@ func runRemote(cfg Config, brokerURL, secret, oneCmd string) int {
 		return 1
 	}
 	fmt.Println("===================================================")
-	fmt.Println("        FASTAGENT — консоль удалённой диагностики (R2)")
+	fmt.Println("        FASTAGENT — консоль удалённой диагностики (R1–R3)")
 	fmt.Println("===================================================")
 	fmt.Printf("Сессия: %s | брокер: %s\n", code, base)
 	if path, terr := remoteTicketFile(cfg, code); terr == nil {
@@ -193,6 +199,294 @@ func remoteSubmit(reader *bufio.Reader, base, secret, code string, key []byte, k
 	return remoteWaitFor(events, id, kind)
 }
 
+// ---------------------------------------------------------------------------
+// R3: передача файлов
+// ---------------------------------------------------------------------------
+
+// remoteGetFile — забрать файл с гостя кусками. Каждый кусок — отдельная
+// подписанная команда get_file; локально сборка идёт во временный .part и
+// переименовывается только после сверки размера и sha256. Так оборванная
+// передача не оставляет полуфайл под настоящим именем.
+func remoteGetFile(base, secret, code string, key []byte, remotePath, localPath string, events <-chan remoteEvent) error {
+	if strings.TrimSpace(localPath) == "" {
+		dir, err := remoteIncomingDir()
+		if err != nil {
+			return err
+		}
+		localPath = filepath.Join(dir, filepath.Base(strings.TrimRight(remotePath, "/\\")))
+	}
+	dst := remoteUniquePath(localPath)
+	tmp := dst + ".part"
+	f, err := os.Create(tmp)
+	if err != nil {
+		return fmt.Errorf("локальный файл %s: %v", tmp, err)
+	}
+	cleanup := func() {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+	}
+
+	var offset, total int64
+	var wantSum string
+	first := true
+	shown := false
+	for {
+		args, _ := json.Marshal(map[string]any{"path": remotePath, "offset": offset})
+		id, serr := remoteSendCmd(base, secret, code, key, "get_file", args, false)
+		if serr != nil {
+			cleanup()
+			return fmt.Errorf("кусок offset=%d не отправлен: %v", offset, serr)
+		}
+		res, ok := remoteWaitResult(events, id, 60*time.Second)
+		if !ok {
+			cleanup()
+			return fmt.Errorf("гость не ответил на кусок offset=%d", offset)
+		}
+		if !res.OK {
+			cleanup()
+			return fmt.Errorf("%s", strings.TrimSpace(res.Out))
+		}
+		if first {
+			first = false
+			total = res.Total
+			wantSum = res.SHA256
+			if total > remoteMaxFileSize {
+				cleanup()
+				return fmt.Errorf("файл %d байт — больше лимита передачи %d", total, int64(remoteMaxFileSize))
+			}
+		}
+		if res.Total != total {
+			cleanup()
+			return fmt.Errorf("размер файла изменился по дороге (%d → %d) — передача отменена", total, res.Total)
+		}
+		if res.Offset != offset {
+			cleanup()
+			return fmt.Errorf("гость отдал offset %d, ждали %d", res.Offset, offset)
+		}
+		chunk, derr := base64.StdEncoding.DecodeString(res.Data)
+		if derr != nil {
+			cleanup()
+			return fmt.Errorf("кусок не base64: %v", derr)
+		}
+		if len(chunk) == 0 && !res.EOF {
+			cleanup()
+			return fmt.Errorf("пустой кусок без признака конца — передача прервана")
+		}
+		if _, werr := f.WriteAt(chunk, offset); werr != nil {
+			cleanup()
+			return fmt.Errorf("запись %s: %v", tmp, werr)
+		}
+		offset += int64(len(chunk))
+		shown = remoteProgress(offset, total) || shown
+		if res.EOF {
+			break
+		}
+	}
+	if shown {
+		fmt.Println()
+	}
+	if cerr := f.Close(); cerr != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("закрытие %s: %v", tmp, cerr)
+	}
+	if offset != total {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("получено %d из %d байт — файл не собран", offset, total)
+	}
+	if wantSum != "" {
+		got, herr := remoteFileSum(tmp)
+		if herr != nil {
+			_ = os.Remove(tmp)
+			return fmt.Errorf("сверка хеша: %v", herr)
+		}
+		if !strings.EqualFold(got, wantSum) {
+			_ = os.Remove(tmp)
+			return fmt.Errorf("sha256 не сошёлся (получено %s, у гостя %s) — файл не сохранён", got, wantSum)
+		}
+	}
+	if rerr := os.Rename(tmp, dst); rerr != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("переименование %s: %v", tmp, rerr)
+	}
+	sum := wantSum
+	if sum == "" {
+		sum, _ = remoteFileSum(dst)
+	}
+	fmt.Printf("[OK] файл получен: %s (%s, sha256 %s)\n", dst, remoteHumanBytes(total), shortHex(sum))
+	return nil
+}
+
+// remotePutFile — положить файл на гостя кусками. Порядок тот же, что у run:
+// первый кусок уходит БЕЗ approved, гость классифицирует запись и просит
+// подтверждение; y спрашивается здесь; только после него куски пишутся.
+// Файл на госте появляется под настоящим именем после сверки sha256.
+func remotePutFile(reader *bufio.Reader, base, secret, code string, key []byte, localPath, remotePath string, events <-chan remoteEvent) (remoteResult, bool) {
+	fi, err := os.Stat(localPath)
+	if err != nil {
+		fmt.Printf("[ERROR] локальный файл: %v\n", err)
+		return remoteResult{}, false
+	}
+	if !fi.Mode().IsRegular() {
+		fmt.Printf("[ERROR] %s — не обычный файл\n", localPath)
+		return remoteResult{}, false
+	}
+	if fi.Size() > remoteMaxFileSize {
+		fmt.Printf("[ERROR] файл %d байт — больше лимита передачи %d\n", fi.Size(), int64(remoteMaxFileSize))
+		return remoteResult{}, false
+	}
+	data, rerr := os.ReadFile(localPath)
+	if rerr != nil {
+		fmt.Printf("[ERROR] чтение %s: %v\n", localPath, rerr)
+		return remoteResult{}, false
+	}
+	sumRaw := sha256.Sum256(data)
+	sum := hex.EncodeToString(sumRaw[:])
+	total := int64(len(data))
+	chunkAt := func(off int64) []byte {
+		end := off + remoteChunkSize
+		if end > total {
+			end = total
+		}
+		return data[off:end]
+	}
+	mkArgs := func(off int64) json.RawMessage {
+		c := chunkAt(off)
+		m := map[string]any{
+			"path":   remotePath,
+			"offset": off,
+			"total":  total,
+			"data":   base64.StdEncoding.EncodeToString(c),
+			"final":  off+int64(len(c)) == total,
+			"sha256": sum,
+		}
+		raw, _ := json.Marshal(m)
+		return raw
+	}
+
+	// Шаг 1: политика ГОСТЯ, без подтверждения. Пока его нет, гость не пишет
+	// ни байта — ответ needs_approval ничего не меняет на диске.
+	id, serr := remoteSendCmd(base, secret, code, key, "put_file", mkArgs(0), false)
+	if serr != nil {
+		fmt.Printf("[ERROR] команда не отправлена: %v\n", serr)
+		return remoteResult{}, false
+	}
+	res, ok := remoteWaitResult(events, id, 60*time.Second)
+	if !ok {
+		return res, false
+	}
+	if !res.NeedsApproval {
+		return res, true // отказ политики: покажется как обычный результат
+	}
+	fmt.Println("\n── требуется подтверждение оператора ──")
+	fmt.Printf("Запись файла на гость: %s (%s, sha256 %s)\n", remotePath, remoteHumanBytes(total), shortHex(sum))
+	fmt.Printf("Вердикт гостя: %s\n", res.Verdict)
+	fmt.Println("Подтверждает только человек за этим терминалом: автоподтверждения нет.")
+	if reader == nil || !confirm(reader, "      Записать файл на гость? (y/n): ", "y") {
+		fmt.Println("      Отменено оператором: файл на госте не записан.")
+		return remoteResult{ID: res.ID, Out: "оператор не подтвердил запись файла", Exit: -1, Verdict: res.Verdict}, true
+	}
+
+	// Шаг 2: куски с approved=true. Первый отправляем заново: пока не было
+	// подтверждения, гость ничего не записал.
+	var offset int64
+	shown := false
+	for {
+		c := chunkAt(offset)
+		id, serr := remoteSendCmd(base, secret, code, key, "put_file", mkArgs(offset), true)
+		if serr != nil {
+			fmt.Printf("[ERROR] кусок offset=%d не отправлен: %v\n", offset, serr)
+			return remoteResult{}, false
+		}
+		// res/ok — те же переменные, что у шага подтверждения: иначе после
+		// цикла наружу уходил результат «нужно подтверждение», а не итог записи.
+		res, ok = remoteWaitResult(events, id, 60*time.Second)
+		if !ok || !res.OK {
+			if shown {
+				fmt.Println()
+			}
+			return res, ok
+		}
+		offset += int64(len(c))
+		shown = remoteProgress(offset, total) || shown
+		if offset >= total {
+			break
+		}
+	}
+	if shown {
+		fmt.Println()
+	}
+	return res, true
+}
+
+// remoteIncomingDir — куда складывать забранные файлы по умолчанию.
+func remoteIncomingDir() (string, error) {
+	dir, err := os.UserCacheDir()
+	if err != nil || dir == "" {
+		dir = os.TempDir()
+	}
+	dir = filepath.Join(dir, "fastagent", "incoming")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("каталог для принятых файлов: %v", err)
+	}
+	return dir, nil
+}
+
+// remoteUniquePath — не затирать то, что уже лежит: файл рядом с одноимённым
+// получает суффикс -1, -2. Молча перезаписывать принятый с гостя файл нельзя.
+func remoteUniquePath(p string) string {
+	if _, err := os.Stat(p); err != nil {
+		return p
+	}
+	ext := filepath.Ext(p)
+	base := strings.TrimSuffix(p, ext)
+	for i := 1; i < 100; i++ {
+		cand := fmt.Sprintf("%s-%d%s", base, i, ext)
+		if _, err := os.Stat(cand); err != nil {
+			return cand
+		}
+	}
+	return p
+}
+
+// remoteProgress — строка прогресса в одну строку терминала. Возвращает true,
+// если что-то напечатала: вызывающий тогда сам добавит перевод строки в конце.
+func remoteProgress(got, total int64) bool {
+	if total <= 0 {
+		return false
+	}
+	pct := got * 100 / total
+	fmt.Printf("\r  передача: %s / %s (%d%%)", remoteHumanBytes(got), remoteHumanBytes(total), pct)
+	return true
+}
+
+// remoteHumanBytes — размер по-человечески: 12.3 КиБ, 4.5 МиБ.
+func remoteHumanBytes(n int64) string {
+	const k = 1024
+	switch {
+	case n < k:
+		return fmt.Sprintf("%d Б", n)
+	case n < k*k:
+		return fmt.Sprintf("%.1f КиБ", float64(n)/k)
+	case n < k*k*k:
+		return fmt.Sprintf("%.1f МиБ", float64(n)/(k*k))
+	}
+	return fmt.Sprintf("%.1f ГиБ", float64(n)/(k*k*k))
+}
+
+// remoteFileSum — sha256 локального файла для сверки с гостем.
+func remoteFileSum(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, io.LimitReader(f, remoteMaxFileSize+1)); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
 func remoteRunOne(base, secret, code string, key []byte, line string, events <-chan remoteEvent) int {
 	kind, args, quit, err := parseRemoteCommand(line)
 	if err != nil {
@@ -203,15 +497,54 @@ func remoteRunOne(base, secret, code string, key []byte, line string, events <-c
 		fmt.Println("[i] выходить некуда: команды нет.")
 		return 2
 	}
-	// reader нужен только для y/n при run; если stdin не терминал, confirm
-	// честно откажет — автоподтверждения в этом режиме нет.
+	// reader нужен только для y/n при run и put; если stdin не терминал,
+	// confirm честно откажет — автоподтверждения в этом режиме нет.
 	reader := bufio.NewReader(os.Stdin)
-	res, ok := remoteSubmit(reader, base, secret, code, key, kind, args, events)
-	if !ok {
+	if !remoteRunParsed(reader, base, secret, code, key, kind, args, events) {
 		return 1
 	}
-	remotePrintResult(res)
 	return 0
+}
+
+// remoteRunParsed — одна разобранная команда консоли: передача файла идёт
+// своим путём (несколько запросов-ответов), остальное — одной командой.
+func remoteRunParsed(reader *bufio.Reader, base, secret, code string, key []byte,
+	kind string, args json.RawMessage, events <-chan remoteEvent) bool {
+	switch kind {
+	case "get_file":
+		var a struct {
+			Path  string `json:"path"`
+			Local string `json:"local"`
+		}
+		if err := json.Unmarshal(args, &a); err != nil || a.Path == "" {
+			fmt.Println("get: нужен путь на госте")
+			return false
+		}
+		if err := remoteGetFile(base, secret, code, key, a.Path, a.Local, events); err != nil {
+			fmt.Printf("[!] %v\n", err)
+			return false
+		}
+		return true
+	case "put_file":
+		var a struct {
+			Path  string `json:"path"`
+			Local string `json:"local"`
+		}
+		if err := json.Unmarshal(args, &a); err != nil || a.Path == "" || a.Local == "" {
+			fmt.Println("put: нужен локальный файл и путь на госте")
+			return false
+		}
+		res, ok := remotePutFile(reader, base, secret, code, key, a.Local, a.Path, events)
+		if ok {
+			remotePrintResult(res)
+		}
+		return ok
+	}
+	res, ok := remoteSubmit(reader, base, secret, code, key, kind, args, events)
+	if ok {
+		remotePrintResult(res)
+	}
+	return ok
 }
 
 func remoteREPL(base, secret, code string, key []byte, events <-chan remoteEvent) int {
@@ -240,10 +573,7 @@ func remoteREPL(base, secret, code string, key []byte, events <-chan remoteEvent
 			fmt.Println(consoleHelp)
 			continue
 		}
-		res, ok := remoteSubmit(reader, base, secret, code, key, kind, args, events)
-		if ok {
-			remotePrintResult(res)
-		}
+		remoteRunParsed(reader, base, secret, code, key, kind, args, events)
 	}
 	remoteCloseSession(base, secret, code)
 	return 0
@@ -297,6 +627,20 @@ func parseRemoteCommand(line string) (kind string, args json.RawMessage, quit bo
 			m["path"] = fields[2]
 		}
 		return mk(m)
+	case "get", "download", "get_file":
+		if len(fields) < 2 {
+			return "", nil, false, fmt.Errorf("использование: get <путь на госте> [локальный путь]")
+		}
+		m := map[string]any{"path": fields[1]}
+		if len(fields) >= 3 {
+			m["local"] = fields[2]
+		}
+		return mk(m)
+	case "put", "upload", "put_file":
+		if len(fields) < 3 {
+			return "", nil, false, fmt.Errorf("использование: put <локальный файл> <путь на госте>")
+		}
+		return mk(map[string]any{"local": fields[1], "path": fields[2]})
 	case "run", "cmd", "exec":
 		// Команда — остаток строки КАК ЕСТЬ: кавычки и пайпы принадлежат
 		// команде, а не парсеру консоли.
@@ -319,6 +663,10 @@ func verbToKind(verb string) string {
 		return "grep_search"
 	case "glob", "file_glob_search":
 		return "file_glob_search"
+	case "get", "download", "get_file":
+		return "get_file"
+	case "put", "upload", "put_file":
+		return "put_file"
 	}
 	return verb
 }

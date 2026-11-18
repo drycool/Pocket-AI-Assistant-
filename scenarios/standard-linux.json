@@ -1,6 +1,8 @@
 {
   "name": "standard-linux",
   "title": "Стандартная диагностика Linux",
+  "section": "standard",
+  "section_title": "Стандарт",
   "checks": [
     {
       "id": "os",

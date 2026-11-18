@@ -1,0 +1,162 @@
+{
+  "name": "medoc/imap-ukrnet",
+  "title": "МЕДОК: почта через IMAP ukr.net",
+  "section": "medoc",
+  "section_title": "МЕДОК",
+  "checks": [
+    {
+      "id": "powershell",
+      "title": "PowerShell 3+ доступен (нужен части проверок)",
+      "priority": 3,
+      "timeout_sec": 60,
+      "commands": [
+        "powershell -NoProfile -Command \"Get-Host | Select-Object Version\""
+      ],
+      "rules": [
+        {
+          "regex": "(?m)^\\s*([3-9]|[1-9][0-9])\\.",
+          "problem_if": "absent",
+          "message": "PowerShell младше 3 или не найден — командлеты Test-NetConnection/Get-NetFirewallRule не работают",
+          "ok_message": "PowerShell 3+ есть"
+        }
+      ],
+      "hint": "Нужен PowerShell 3+: на Windows 8+ он есть, на Windows 7 — только после обновления. Без него проверки портов и брандмауэра честно покажут «команда завершилась с ошибкой»."
+    },
+    {
+      "id": "medoc_running",
+      "title": "МЕДОК запущен",
+      "priority": 3,
+      "timeout_sec": 60,
+      "commands": [
+        "powershell -NoProfile -Command \"Get-Process | Where-Object { $_.ProcessName -match 'medoc' } | Select-Object ProcessName,Id\""
+      ],
+      "rules": [
+        {
+          "regex": "(?i)medoc",
+          "problem_if": "absent",
+          "message": "МЕДОК не запущен: программа закрыта, письма сами не уйдут",
+          "ok_message": "МЕДОК запущен"
+        }
+      ],
+      "hint": "Письма уходят только при запущенной программе. Открыть МЕДОК на машине клиента и повторить проверку."
+    },
+    {
+      "id": "dns",
+      "title": "Имена imap.ukr.net и smtp.ukr.net разрешаются",
+      "priority": 1,
+      "timeout_sec": 60,
+      "commands": [
+        "nslookup imap.ukr.net",
+        "nslookup smtp.ukr.net"
+      ],
+      "rules": [
+        {
+          "regex": "(?i)(can.?t find|не удалось|nxdomain|timed out|истекло время)",
+          "message": "имена почтовых серверов не разрешаются (ошибок: {n})",
+          "ok_message": "имена imap/smtp.ukr.net разрешаются"
+        }
+      ],
+      "hint": "Это DNS, а не пароль: ipconfig /flushdns, затем прописать DNS 1.1.1.1 на время проверки. Если и с ним не разрешается — провайдер/фильтр."
+    },
+    {
+      "id": "tcp_imap_993",
+      "title": "Порт 993 (IMAP) открывается",
+      "priority": 1,
+      "timeout_sec": 90,
+      "commands": [
+        "powershell -NoProfile -Command \"Test-NetConnection imap.ukr.net -Port 993 -InformationLevel Quiet\""
+      ],
+      "rules": [
+        {
+          "regex": "(?m)^\\s*False\\s*$",
+          "message": "порт 993 (IMAP) с этой машины не открывается — сеть, провайдер или фильтр",
+          "ok_message": "порт 993 (IMAP) открывается"
+        }
+      ],
+      "hint": "Сначала проверить с телефона в этой же сети: если и там закрыто — провайдер/роутер; если только на ПК — брандмауэр или антивирус (Zillya тоже фильтрует соединения)."
+    },
+    {
+      "id": "tcp_smtp_465",
+      "title": "Порт 465 (SMTP) открывается",
+      "priority": 1,
+      "timeout_sec": 90,
+      "commands": [
+        "powershell -NoProfile -Command \"Test-NetConnection smtp.ukr.net -Port 465 -InformationLevel Quiet\""
+      ],
+      "rules": [
+        {
+          "regex": "(?m)^\\s*False\\s*$",
+          "message": "порт 465 (SMTP) с этой машины не открывается — письма не уходят",
+          "ok_message": "порт 465 (SMTP) открывается"
+        }
+      ],
+      "hint": "Если 993 открыт, а 465 нет — исходящую почту режет провайдер или фильтр. Проверить отправку с телефона."
+    },
+    {
+      "id": "mail_errors",
+      "title": "Ошибки почты и SSL в журнале Application",
+      "priority": 2,
+      "timeout_sec": 120,
+      "commands": [
+        "wevtutil qe Application /c:60 /rd:true /f:text /q:*[System[(Level=1 or Level=2)]]"
+      ],
+      "rules": [
+        {
+          "regex": "(?i)(medoc|imap|smtp|ssl|tls|сертификат|certificate)",
+          "message": "в журнале Application ошибки, связанные с почтой или SSL: {n}",
+          "ok_message": "свежих ошибок МЕДОК/SSL нет"
+        }
+      ],
+      "hint": "Смотреть текст ошибки: authentication failed — пароль; SSL/certificate — время или перехват TLS антивирусом; connection refused — сеть."
+    },
+    {
+      "id": "security_products",
+      "title": "Какие антивирусы и фильтры стоят",
+      "priority": 3,
+      "timeout_sec": 60,
+      "commands": [
+        "powershell -NoProfile -Command \"Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntiVirusProduct | Select-Object displayName,productState\""
+      ],
+      "rules": [],
+      "hint": "Антивирус может перехватывать TLS и ломать IMAP/SMTP. Если в списке Zillya — см. кейс «МЕДОК Сервер и Zillya»."
+    }
+  ],
+  "fixes": [
+    {
+      "id": "flushdns",
+      "title": "Сбросить кэш DNS",
+      "confirm": "Сбросить кэш DNS на машине клиента?",
+      "commands": [
+        "ipconfig /flushdns"
+      ],
+      "recheck": [
+        "dns"
+      ]
+    }
+  ],
+  "practice": [
+    {
+      "when": [
+        "dns"
+      ],
+      "title": "DNS не разрешает почтовые серверы",
+      "text": "Проверить ipconfig /all: какой DNS выдан. Временно поставить 1.1.1.1 и повторить nslookup.\nЕсли с 1.1.1.1 разрешается — виноват DNS провайдера/роутера.\nЕсли не разрешается ни с каким — фильтр (роутер с «родительским контролем», антивирус, hosts)."
+    },
+    {
+      "when": [
+        "tcp_imap_993",
+        "tcp_smtp_465"
+      ],
+      "title": "Порты наружу не открываются",
+      "text": "Проверка с телефона в этой же сети — отделяет провайдера от ПК.\nТолько на ПК: брандмауэр Windows и антивирус (Zillya) режут исходящие.\nВезде: у провайдера закрыты 993/465 — тогда почта не работает ни у кого в офисе; варианты — мобильный интернет или запрос провайдеру."
+    },
+    {
+      "when": [
+        "medoc_running",
+        "mail_errors"
+      ],
+      "title": "Если порты открыты, а письма не идут — это учётка",
+      "text": "Порядок для ukr.net (пункты интерфейса там украинские):\n1) Уточнить у клиента, что именно: не уходят (SMTP) или не приходят (IMAP).\n2) Настройки ukr.net → Безопасность → Пароли для приложений (Налаштування → Безпека → Паролі для програм): если включена двухэтапная аутентификация, обычный пароль IMAP не подойдёт — нужен пароль приложения.\n3) Этот пароль приложения вписать в настройки почты МЕДОК: приём imap.ukr.net:993 SSL, отправка smtp.ukr.net:465 SSL.\n4) В ukr.net проверить, что доступ по IMAP/POP включён (Налаштування → Пошта).\n5) После смены пароля в ukr.net старые приложения падают с authentication failed — перевыпустить пароль приложения именно для МЕДОК.\n6) Если в веб-интерфейсе ukr.net «підозрілий вхід» — ящик могли ограничить; проверить вход через браузер.\nВсе шаги — в интерфейсах ukr.net и МЕДОК, скриптом их не сделать: это работа оператора с клиентом."
+    }
+  ]
+}

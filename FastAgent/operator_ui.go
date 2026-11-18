@@ -79,7 +79,8 @@ func runOperatorUI(cfg Config, base, secret, code string, key []byte, events <-c
 	fmt.Println("===========================================================")
 	fmt.Printf("  СЕССИЯ %s · уровень L2 (удалённо)\n", code)
 	if st.sc != nil {
-		fmt.Printf("  Регламент: %s (проверок %d, починок %d)\n", st.sc.Title, len(st.sc.Checks), len(st.sc.Fixes))
+		fmt.Printf("  Регламент: %s / %s (проверок %d, починок %d)\n",
+			st.sc.SectionTitle, st.sc.Title, len(st.sc.Checks), len(st.sc.Fixes))
 	} else {
 		fmt.Println("  Регламент не загружен: работает только отчёт и выход.")
 	}
@@ -113,10 +114,12 @@ func runOperatorUI(cfg Config, base, secret, code string, key []byte, events <-c
 			opReport(st)
 		case "5", "q", "quit", "exit":
 			return opQuit(st)
+		case "6":
+			opScenarios(st)
 		case "", "?":
 			// пустая строка — перепечатать меню
 		default:
-			fmt.Println("Введите номер 1–5.")
+			fmt.Println("Введите номер 1–6.")
 		}
 	}
 }
@@ -135,6 +138,17 @@ func opPrintMenu(st *opState) {
 	}
 	fmt.Println(" 4  Отчёт: архив, уроки, контроль секретов")
 	fmt.Println(" 5  Выход")
+	if len(scenarioCatalog()) > 1 {
+		fmt.Println(" 6  Сценарий: раздел и кейс (сейчас: " + st.scenarioName() + ")")
+	}
+}
+
+// scenarioName — короткая подпись текущего регламента для меню.
+func (st *opState) scenarioName() string {
+	if st.sc == nil {
+		return "нет"
+	}
+	return st.sc.SectionTitle + " / " + st.sc.Title
 }
 
 // opStart — обязательный блок. Возвращает false, если что-то не сошлось:
@@ -263,7 +277,56 @@ func opDiagnostics(st *opState) {
 	for _, p := range probs {
 		fmt.Printf("  [%s] %s: %s\n", priorityLabel(p.Priority), p.Title, p.Message)
 	}
+	if len(probs) > 0 {
+		opAdvice(st, probs)
+	}
 	st.arch.Note("меню: диагностика", fmt.Sprintf("%d проверок, проблем %d", len(st.results), len(probs)))
+}
+
+// opAdvice — что оператору делать с найденными проблемами: подсказка самой
+// проверки и практика решения по разделу (только та, что относится к делу).
+func opAdvice(st *opState, probs []checkResult) {
+	if st.sc == nil || len(probs) == 0 {
+		return
+	}
+	failed := make(map[string]bool, len(probs))
+	for _, p := range probs {
+		failed[p.ID] = true
+	}
+	fmt.Println("\n── ЧТО ДЕЛАТЬ ──")
+	for _, p := range probs {
+		c, ok := st.sc.checkByID(p.ID)
+		if !ok || strings.TrimSpace(c.Hint) == "" {
+			continue
+		}
+		fmt.Printf("  • %s\n", p.Title)
+		for _, line := range strings.Split(strings.TrimSpace(c.Hint), "\n") {
+			fmt.Printf("    %s\n", line)
+		}
+	}
+	for _, pr := range st.sc.Practice {
+		if !practiceApplies(pr, failed) {
+			continue
+		}
+		fmt.Printf("\n  Практика: %s\n", pr.Title)
+		for _, line := range strings.Split(strings.TrimSpace(pr.Text), "\n") {
+			fmt.Printf("    %s\n", line)
+		}
+	}
+}
+
+// practiceApplies — показывать практику, если провалилась хотя бы одна из
+// названных проверок; пустой when — практика по всему кейсу.
+func practiceApplies(p scenarioPractice, failed map[string]bool) bool {
+	if len(p.When) == 0 {
+		return true
+	}
+	for _, id := range p.When {
+		if failed[id] {
+			return true
+		}
+	}
+	return false
 }
 
 // opRunCheck — выполнить команды проверки и оценить правила.
@@ -305,7 +368,11 @@ func (st *opState) runCommands(cmds []string, timeout time.Duration) (out string
 		if res.NeedsApproval {
 			return b.String(), false, true, true
 		}
-		if !res.OK {
+		// res.OK на госте означает «команда выполнена», а не «успешно»: код
+		// возврата приходит отдельно. Без этой проверки `powershell: not found`
+		// (exit 127) считался «в порядке», если regex не нашёл проблемы —
+		// поймано живым прогоном кейса МЕДОК на pi5.
+		if !res.OK || res.Exit != 0 {
 			allOK = false
 		}
 		b.WriteString(res.Out)
@@ -411,10 +478,98 @@ func opFixes(st *opState) {
 	}
 	if !failed {
 		st.fixesDone = append(st.fixesDone, f.ID)
-		fmt.Println("\nПочинка выполнена. Если проблема была в проверке — повторите пункт 2.")
+		fmt.Println("\nПочинка выполнена.")
+		if len(f.Recheck) > 0 {
+			opRecheck(st, f)
+		} else {
+			fmt.Println("Если проблема была в проверке — повторите пункт 2.")
+		}
 	} else {
 		fmt.Println("\n[!] Починка завершилась с ошибкой — см. код и вывод выше.")
 	}
+}
+
+// opRecheck — сразу после починки прогнать проверки, к которым она привязана,
+// и заменить их итоги. Оператор видит «починили — стало [OK]», а не гадает,
+// помогло ли; полный прогон остаётся в пункте 2.
+func opRecheck(st *opState, f scenarioFix) {
+	fmt.Println("\n── ПОВТОРНАЯ ПРОВЕРКА после починки ──")
+	for _, id := range f.Recheck {
+		c, ok := st.sc.checkByID(id)
+		if !ok {
+			continue
+		}
+		fmt.Printf("  %s … ", c.Title)
+		res := opRunCheck(st, c)
+		st.setResult(res)
+		if res.OK {
+			fmt.Printf("[OK] %s\n", res.Message)
+			continue
+		}
+		fmt.Printf("[!] %s\n", res.Message)
+	}
+	if len(sortedProblems(st.results)) == 0 {
+		fmt.Println("\n[OK] по этому регламенту замечаний больше нет.")
+	}
+}
+
+// setResult — заменить итог проверки после повторного прогона (по id).
+func (st *opState) setResult(res checkResult) {
+	for i := range st.results {
+		if st.results[i].ID == res.ID {
+			st.results[i] = res
+			return
+		}
+	}
+	st.results = append(st.results, res)
+}
+
+// opScenarios — выбор сценария по разделам: сеть, МЕДОК, … Список строится из
+// того, что лежит в scenarios/ и подкаталогах, поэтому новый кейс — это файл,
+// а не правка меню.
+func opScenarios(st *opState) {
+	cat := scenarioCatalog()
+	if len(cat) == 0 {
+		fmt.Println("[i] Сценариев рядом нет: положите JSON в scenarios/ или scenarios/<раздел>/.")
+		return
+	}
+	fmt.Println("\n── СЦЕНАРИИ ──")
+	section := ""
+	for i, e := range cat {
+		if e.SectionTitle != section {
+			section = e.SectionTitle
+			fmt.Printf("\n  %s\n", section)
+		}
+		mark := ""
+		if st.sc != nil && e.Title == st.sc.Title {
+			mark = "  ← сейчас"
+		}
+		fmt.Printf("  %2d  %s (%s)%s\n", i+1, e.Title, e.Name, mark)
+	}
+	fmt.Println("\n   0  назад")
+	fmt.Print("Выбор: ")
+	line, err := st.reader.ReadString('\n')
+	if err != nil {
+		return
+	}
+	n, perr := strconv.Atoi(strings.TrimSpace(line))
+	if perr != nil || n < 0 || n > len(cat) {
+		fmt.Println("Нет такого пункта.")
+		return
+	}
+	if n == 0 {
+		return
+	}
+	sc, err := loadScenario(cat[n-1].Name)
+	if err != nil {
+		fmt.Printf("[!] %v\n", err)
+		return
+	}
+	st.sc = sc
+	st.results = nil
+	st.fixesDone = nil
+	fmt.Printf("[OK] сценарий: %s / %s (проверок %d, починок %d)\n",
+		sc.SectionTitle, sc.Title, len(sc.Checks), len(sc.Fixes))
 }
 
 func (st *opState) fixDone(id string) bool {

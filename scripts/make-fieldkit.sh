@@ -44,10 +44,10 @@ cp -f "$ROOT/RUN-FIELD-TEST.txt"           "$KIT/RUN-FIELD-TEST.txt"
 cp -f "$ROOT/RUN-REMOTE-TEST.txt"          "$KIT/RUN-REMOTE-TEST.txt"
 echo "[+] README.md, FastAgent-README.md, FIELD-TEST.md, RUN-FIELD-TEST.txt, RUN-REMOTE-TEST.txt"
 
-# --- сценарии оператора (R5) ---
+# --- сценарии оператора (R5): корень + разделы (medoc/, network/, …) ---
 mkdir -p "$KIT/scenarios"
-cp -f "$ROOT"/scenarios/*.json "$KIT/scenarios/"
-echo "[+] scenarios/ ($(ls "$KIT"/scenarios/*.json | wc -l) файла, включая manifest.json)"
+cp -r "$ROOT/scenarios/." "$KIT/scenarios/"
+echo "[+] scenarios/ ($(find "$KIT/scenarios" -name '*.json' | wc -l) файлов JSON, включая manifest.json)"
 
 # --- тесты и прогонщик ---
 cp -f "$ROOT"/tests/field-*.txt "$KIT/tests/"
@@ -113,8 +113,9 @@ echo "[+] README-FIRST.txt"
   cd "$KIT"
   sha256sum fastagent.exe config.fast.example.json README.md FastAgent-README.md \
             FIELD-TEST.md RUN-FIELD-TEST.txt RUN-REMOTE-TEST.txt README-FIRST.txt tests/*.txt \
-            scenarios/*.json \
             scripts/field-test-fastagent.bat > SHA256SUMS.txt 2>/dev/null || true
+  find scenarios -name '*.json' | sort | xargs sha256sum >> SHA256SUMS.txt
+  [[ -f scenarios/README.md ]] && sha256sum scenarios/README.md >> SHA256SUMS.txt
   [[ -f fastagent-linux-arm64 ]] && sha256sum fastagent-linux-arm64 >> SHA256SUMS.txt
   [[ -f fastagent-linux-amd64 ]] && sha256sum fastagent-linux-amd64 >> SHA256SUMS.txt
 )

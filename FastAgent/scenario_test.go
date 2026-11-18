@@ -150,3 +150,125 @@ func TestParseJournalHeader(t *testing.T) {
 		t.Fatalf("шапка разобрана неверно: %q %q %d %d", host, path, lines, size)
 	}
 }
+
+func TestLoadScenarioMedocCases(t *testing.T) {
+	baseDir = ".."
+	for _, name := range []string{"medoc/imap-ukrnet", "medoc/server-zillya"} {
+		sc, err := loadScenario(name)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if sc.Section != "medoc" || sc.SectionTitle != "МЕДОК" {
+			t.Fatalf("%s: раздел %q/%q", name, sc.Section, sc.SectionTitle)
+		}
+		if len(sc.Practice) == 0 {
+			t.Fatalf("%s: практика решения пустая", name)
+		}
+		for _, f := range sc.Fixes {
+			if len(f.Recheck) == 0 {
+				t.Fatalf("%s: у починки %s нет повторной проверки", name, f.ID)
+			}
+		}
+	}
+}
+
+func TestScenarioCatalogGroupsSections(t *testing.T) {
+	baseDir = ".."
+	cat := scenarioCatalog()
+	if len(cat) < 4 {
+		t.Fatalf("в каталоге %d сценариев, ожидалось минимум 4: %+v", len(cat), cat)
+	}
+	sections := map[string]bool{}
+	names := map[string]bool{}
+	for _, e := range cat {
+		sections[e.Section] = true
+		names[e.Name] = true
+	}
+	if !sections["medoc"] || !sections["standard"] {
+		t.Fatalf("нет разделов medoc/standard: %+v", sections)
+	}
+	if !names["medoc/server-zillya"] || !names["standard-windows"] {
+		t.Fatalf("каталог не увидел кейсы: %+v", names)
+	}
+}
+
+// TestScenarioCommandsAllowedOnGuest — сценарий не имеет права присылать
+// команды, которые политика гостя заблокирует: проверки идут без
+// подтверждения (только чтение), починки — с подтверждением (L2+).
+func TestScenarioCommandsAllowedOnGuest(t *testing.T) {
+	baseDir = ".."
+	for _, e := range scenarioCatalog() {
+		sc, err := loadScenario(e.Name)
+		if err != nil {
+			t.Fatalf("%s: %v", e.Name, err)
+		}
+		for _, c := range sc.Checks {
+			for _, cmd := range c.Commands {
+				if v := classify(cmd, L1Read); v != VReadOnly {
+					t.Errorf("%s/%s: проверка %q даёт %s, а должна быть только чтением",
+						e.Name, c.ID, cmd, v)
+				}
+			}
+		}
+		for _, f := range sc.Fixes {
+			for _, cmd := range f.Commands {
+				v := classify(cmd, L2Fix)
+				if v == VForbidden || v == VNotAllowed {
+					t.Errorf("%s/%s: починка %q даёт %s — гость её не выполнит даже с подтверждением",
+						e.Name, f.ID, cmd, v)
+				}
+			}
+		}
+	}
+}
+
+func TestScenarioRecheckMustExist(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bad-recheck.json")
+	body := `{"name":"x","checks":[{"id":"a","title":"a","commands":["ipconfig /all"]}],
+		"fixes":[{"id":"f","title":"f","confirm":"y","commands":["ipconfig /flushdns"],"recheck":["nope"]}]}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadScenario(path); err == nil {
+		t.Fatal("recheck на неизвестную проверку должен ломать загрузку")
+	}
+}
+
+func TestScenarioDuplicateCheckID(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "dup.json")
+	body := `{"name":"x","checks":[{"id":"a","title":"a","commands":["ipconfig /all"]},
+		{"id":"a","title":"b","commands":["ipconfig /all"]}]}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadScenario(path); err == nil {
+		t.Fatal("дубль id проверки должен ломать загрузку")
+	}
+}
+
+func TestPracticeApplies(t *testing.T) {
+	failed := map[string]bool{"dns": true}
+	if practiceApplies(scenarioPractice{When: []string{"dns"}}, failed) != true {
+		t.Fatal("практика должна показываться, когда её проверка провалена")
+	}
+	if practiceApplies(scenarioPractice{When: []string{"tcp_imap_993"}}, failed) {
+		t.Fatal("чужую практику показывать нельзя")
+	}
+	if !practiceApplies(scenarioPractice{}, failed) {
+		t.Fatal("практика без when относится ко всему кейсу")
+	}
+}
+
+func TestSetResultReplacesByID(t *testing.T) {
+	st := &opState{results: []checkResult{{ID: "a", OK: false}, {ID: "b", OK: true}}}
+	st.setResult(checkResult{ID: "a", OK: true, Message: "ок"})
+	if !st.results[0].OK || st.results[0].Message != "ок" || len(st.results) != 2 {
+		t.Fatalf("итог не заменился: %+v", st.results)
+	}
+	st.setResult(checkResult{ID: "c", OK: false})
+	if len(st.results) != 3 {
+		t.Fatalf("новая проверка не добавилась: %+v", st.results)
+	}
+}

@@ -1,6 +1,8 @@
 {
   "name": "standard-windows",
   "title": "Стандартная диагностика Windows",
+  "section": "standard",
+  "section_title": "Стандарт",
   "checks": [
     {
       "id": "os",

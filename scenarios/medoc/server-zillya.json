@@ -1,0 +1,200 @@
+{
+  "name": "medoc/server-zillya",
+  "title": "МЕДОК Сервер: порт 9996 и брандмауэр Zillya",
+  "section": "medoc",
+  "section_title": "МЕДОК",
+  "checks": [
+    {
+      "id": "powershell",
+      "title": "PowerShell 3+ доступен (нужен части проверок)",
+      "priority": 3,
+      "timeout_sec": 60,
+      "commands": [
+        "powershell -NoProfile -Command \"Get-Host | Select-Object Version\""
+      ],
+      "rules": [
+        {
+          "regex": "(?m)^\\s*([3-9]|[1-9][0-9])\\.",
+          "problem_if": "absent",
+          "message": "PowerShell младше 3 или не найден — командлеты Test-NetConnection/Get-NetFirewallRule не работают",
+          "ok_message": "PowerShell 3+ есть"
+        }
+      ],
+      "hint": "Нужен PowerShell 3+: на Windows 8+ он есть, на Windows 7 — только после обновления. Без него проверки портов и брандмауэра честно покажут «команда завершилась с ошибкой»."
+    },
+    {
+      "id": "medoc_service",
+      "title": "Служба МЕДОК Сервер работает",
+      "priority": 1,
+      "timeout_sec": 60,
+      "commands": [
+        "powershell -NoProfile -Command \"Get-Service | Where-Object { $_.Name -match 'medoc|e\\.doc' } | Select-Object Name,DisplayName,Status,StartType\""
+      ],
+      "rules": [
+        {
+          "regex": "(?m)\\bRunning\\b",
+          "problem_if": "absent",
+          "message": "служба МЕДОК не найдена или остановлена — сервер не принимает соединения",
+          "ok_message": "служба МЕДОК работает"
+        }
+      ],
+      "hint": "Если службы нет в списке — сервер установлен не как служба либо называется иначе; если Stopped — запустить в services.msc. Падает при старте — журнал Application (см. проверку ошибок ниже)."
+    },
+    {
+      "id": "port_9996",
+      "title": "Порт 9996 слушается",
+      "priority": 1,
+      "timeout_sec": 60,
+      "ignore_exit": true,
+      "commands": [
+        "netstat -ano | findstr :9996"
+      ],
+      "rules": [
+        {
+          "regex": ":9996",
+          "problem_if": "absent",
+          "message": "порт 9996 никто не слушает — сервер МЕДОК не запущен",
+          "ok_message": "порт 9996 слушается"
+        }
+      ],
+      "hint": "Служба может быть Running, а порт при этом не открыт: сервер упал внутри или слушает другой порт. Смотреть PID из netstat и процесс."
+    },
+    {
+      "id": "loopback_9996",
+      "title": "Локальное подключение к 127.0.0.1:9996 проходит",
+      "priority": 1,
+      "timeout_sec": 90,
+      "commands": [
+        "powershell -NoProfile -Command \"Test-NetConnection 127.0.0.1 -Port 9996 -InformationLevel Quiet\""
+      ],
+      "rules": [
+        {
+          "regex": "(?m)^\\s*False\\s*$",
+          "message": "порт слушается, но соединение с 127.0.0.1:9996 не проходит — фильтр блокирует локальный трафик",
+          "ok_message": "локальное подключение к 127.0.0.1:9996 проходит"
+        }
+      ],
+      "hint": "Это ключевой признак: сервер жив и слушает, но соединение режется. Смотреть брандмауэр Zillya (её собственный, не Windows) и его правила для MEDocServer.exe."
+    },
+    {
+      "id": "zillya_service",
+      "title": "Zillya установлена и работает",
+      "priority": 3,
+      "timeout_sec": 60,
+      "commands": [
+        "powershell -NoProfile -Command \"Get-Service | Where-Object { $_.Name -match 'zillya' -or $_.DisplayName -match 'zillya' } | Select-Object Name,DisplayName,Status\""
+      ],
+      "rules": [
+        {
+          "regex": "(?m)\\bRunning\\b",
+          "problem_if": "absent",
+          "message": "Zillya не найдена или не запущена — причина, скорее всего, не в ней",
+          "ok_message": "Zillya работает"
+        }
+      ],
+      "hint": "Если Zillya не установлена, кейс не про неё: искать фильтр в другом антивирусе или в брандмауэре Windows."
+    },
+    {
+      "id": "fw_rules",
+      "title": "Правила брандмауэра Windows для МЕДОК",
+      "priority": 2,
+      "timeout_sec": 120,
+      "commands": [
+        "powershell -NoProfile -Command \"Get-NetFirewallRule | Where-Object { $_.DisplayName -match 'medoc|zillya' } | Select-Object DisplayName,Direction,Action,Enabled,Profile\""
+      ],
+      "rules": [
+        {
+          "regex": "(?m)\\bBlock\\b",
+          "message": "в брандмауэре Windows есть блокирующие правила для МЕДОК: {n}",
+          "ok_message": "блокирующих правил Windows для МЕДОК нет"
+        }
+      ],
+      "hint": "Правило Block отключается вручную: wf.msc → «Правила для исходящего подключения» → найти по имени."
+    },
+    {
+      "id": "app_errors",
+      "title": "Ошибки МЕДОК и фильтра в журнале Application",
+      "priority": 2,
+      "timeout_sec": 120,
+      "commands": [
+        "wevtutil qe Application /c:60 /rd:true /f:text /q:*[System[(Level=1 or Level=2)]]"
+      ],
+      "rules": [
+        {
+          "regex": "(?i)(medoc|9996|zillya|firewall|брандмауэр|access is denied)",
+          "message": "в журнале Application ошибки МЕДОК или фильтра: {n}",
+          "ok_message": "свежих ошибок МЕДОК/фильтра нет"
+        }
+      ],
+      "hint": "Читать текст: connection refused — некому отвечать; access denied — отказ фильтра; 10061/10013 — сетевые коды Winsock."
+    },
+    {
+      "id": "medoc_paths",
+      "title": "Где лежит МЕДОК и когда обновлялся",
+      "priority": 3,
+      "timeout_sec": 60,
+      "commands": [
+        "powershell -NoProfile -Command \"Get-ChildItem 'C:\\Program Files\\Medoc','C:\\Program Files (x86)\\Medoc' -ErrorAction SilentlyContinue | Select-Object Name,LastWriteTime\""
+      ],
+      "rules": [],
+      "hint": "После обновления МЕДОК exe может переехать по другому пути — тогда правило антивируса указывает на старый файл и перестаёт совпадать."
+    },
+    {
+      "id": "zillya_paths",
+      "title": "Файлы и журналы Zillya",
+      "priority": 3,
+      "timeout_sec": 60,
+      "commands": [
+        "powershell -NoProfile -Command \"Get-ChildItem 'C:\\Program Files\\Zillya','C:\\Program Files (x86)\\Zillya','C:\\ProgramData\\Zillya' -ErrorAction SilentlyContinue | Select-Object -First 20 FullName\""
+      ],
+      "rules": [],
+      "hint": "Отсюда видно, куда Zillya пишет журналы: в них бывает строка о заблокированном соединении с адресом и портом."
+    }
+  ],
+  "fixes": [
+    {
+      "id": "restart_medoc_server",
+      "title": "Перезапустить службу МЕДОК Сервер",
+      "confirm": "Перезапустить службу МЕДОК Сервер? Станции на несколько секунд потеряют связь.",
+      "needs_admin": true,
+      "commands": [
+        "powershell -NoProfile -Command \"Restart-Service -Name 'MEDocServer' -ErrorAction Stop\""
+      ],
+      "recheck": [
+        "medoc_service",
+        "port_9996",
+        "loopback_9996"
+      ]
+    }
+  ],
+  "practice": [
+    {
+      "when": [
+        "medoc_service",
+        "port_9996"
+      ],
+      "title": "Сервер не работает",
+      "text": "Порядок: служба → порт → соединение.\nСлужба Stopped: запустить в services.msc, смотреть, не падает ли через несколько секунд (тогда журнал Application).\nСлужба Running, порт молчит: сервер упал внутри — перезапуск службы; в netstat найти PID и проверить, что это MEDocServer.exe.\nЕсли имя службы не MEDocServer — взять точное из вывода проверки «Служба МЕДОК Сервер» и перезапустить вручную."
+    },
+    {
+      "when": [
+        "loopback_9996"
+      ],
+      "title": "Порт слушается, а соединение режется — это фильтр",
+      "text": "Проверка тестирует 127.0.0.1:9996, то есть соединение внутри машины. Если порт слушается, а сюда не доходит — трафик перехватывает драйвер фильтра, обычно брандмауэр антивируса (Zillya), а не сеть и не провайдер.\nЧто делать в Zillya:\n1) Открыть настройки → «Мережевий екран» (брандмауэр).\n2) Найти правила для MEDoc.exe и MEDocServer.exe (станция и сервер) и удалить их.\n3) Добавить заново по ТЕКУЩИМ путям (см. проверку «Где лежит МЕДОК»), разрешив входящие и исходящие.\n4) Отдельно проверить режим: если стоит «блокировать всё без правил» — разрешение не сработает.\n5) Перезапустить службу МЕДОК Сервер и повторить проверку.\nПочему помогает не навсегда: правило привязано к конкретному exe/пути. После обновления МЕДОК файл меняется — старое правило перестаёт совпадать, и блокировка возвращается до пересоздания правила."
+    },
+    {
+      "when": [
+        "zillya_service",
+        "fw_rules",
+        "app_errors"
+      ],
+      "title": "Если Zillya ни при чём",
+      "text": "Проверить брандмауэр Windows: правила Block для МЕДОК (проверка «Правила брандмауэра Windows»), профили сети (частная/общественная) — при смене профиля правила могут не применяться.\nЖурнал Application: искать код 10061 (connection refused) и 10013 (permission denied) — второй почти всегда фильтр.\nЕсли Zillya не установлена — смотреть другой антивирус (Defender, ESET) и его сетевой экран."
+    },
+    {
+      "title": "Наблюдение по этому классу проблем",
+      "text": "Симптом «выключили антивирус — сервер заработал; включили — работает до следующего перезапуска МЕДОК» означает, что разрешение привязано к процессу/пути, а не к порту.\nПока соединение установлено, фильтр его пропускает; после перезапуска МЕДОК — новый процесс, старые правила не совпали, соединение режется снова.\nПоэтому «просто выключить антивирус» — не решение: нужно заново завести правила по текущим путям и проверить, что они сохраняются (самозащита Zillya может откатывать правки — тогда менять через её интерфейс, а не файлом)."
+    }
+  ]
+}

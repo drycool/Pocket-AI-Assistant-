@@ -19,6 +19,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -26,12 +27,16 @@ import (
 	"strings"
 )
 
-// scenario — один регламент. Имя файла — <name>.json в каталоге scenarios/.
+// scenario — один регламент. Имя файла — <name>.json в каталоге scenarios/;
+// кейсы по клиентам лежат в подкаталогах-разделах: scenarios/medoc/<кейс>.json.
 type scenario struct {
-	Name   string          `json:"name"`
-	Title  string          `json:"title"`
-	Checks []scenarioCheck `json:"checks"`
-	Fixes  []scenarioFix   `json:"fixes"`
+	Name         string             `json:"name"`
+	Title        string             `json:"title"`
+	Section      string             `json:"section,omitempty"`       // medoc, network, …
+	SectionTitle string             `json:"section_title,omitempty"` // «МЕДОК», «Сеть», …
+	Checks       []scenarioCheck    `json:"checks"`
+	Fixes        []scenarioFix      `json:"fixes"`
+	Practice     []scenarioPractice `json:"practice,omitempty"`
 }
 
 // scenarioCheck — одна проверка. Команды выполняются на госте по политике
@@ -43,8 +48,18 @@ type scenarioCheck struct {
 	TimeoutSec   int            `json:"timeout_sec"`   // 0 — 120 с
 	IgnoreExit   bool           `json:"ignore_exit"`   // dir по пустому каталогу возвращает 1
 	EmptyProblem bool           `json:"empty_problem"` // пустой вывод — это проблема
+	Hint         string         `json:"hint,omitempty"`
 	Commands     []string       `json:"commands"`
 	Rules        []scenarioRule `json:"rules"`
+}
+
+// scenarioPractice — практика решения: текст для оператора, который знает этот
+// класс проблем. Показывается после диагностики, только когда есть проблемы;
+// when ограничивает показ проверками, которые провалились.
+type scenarioPractice struct {
+	When  []string `json:"when,omitempty"`
+	Title string   `json:"title"`
+	Text  string   `json:"text"`
 }
 
 // scenarioRule — «проблема, если regex найден (или не найден)».
@@ -57,12 +72,15 @@ type scenarioRule struct {
 }
 
 // scenarioFix — починка: оператор выбирает её номером, подтверждает один раз.
+// recheck — проверки, которые нужно повторить сразу после успешной починки:
+// «починили — убедились», а не «починили — и надеемся».
 type scenarioFix struct {
 	ID         string   `json:"id"`
 	Title      string   `json:"title"`
 	Confirm    string   `json:"confirm"`
 	NeedsAdmin bool     `json:"needs_admin"`
 	Commands   []string `json:"commands"`
+	Recheck    []string `json:"recheck,omitempty"`
 }
 
 // checkResult — итог проверки для экрана и отчёта.
@@ -96,8 +114,13 @@ func loadScenario(name string) (*scenario, error) {
 	path := name
 	if !strings.HasSuffix(name, ".json") {
 		path = filepath.Join(scenarioDir(), name+".json")
-	} else if !strings.ContainsAny(name, "/\\") {
-		path = filepath.Join(scenarioDir(), name)
+	} else if !filepath.IsAbs(name) {
+		// «medoc/imap-ukrnet.json» — путь внутри scenarios/; относительный путь,
+		// который существует в рабочем каталоге, уважаем как есть.
+		if _, statErr := os.Stat(name); statErr != nil {
+			name = filepath.Join(scenarioDir(), name)
+		}
+		path = name
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -110,11 +133,22 @@ func loadScenario(name string) (*scenario, error) {
 	if len(sc.Checks) == 0 {
 		return nil, fmt.Errorf("сценарий %s: нет проверок", path)
 	}
+	if strings.TrimSpace(sc.Section) == "" {
+		sc.Section = "standard"
+	}
+	if strings.TrimSpace(sc.SectionTitle) == "" {
+		sc.SectionTitle = sc.Section
+	}
+	ids := make(map[string]bool, len(sc.Checks))
 	for i := range sc.Checks {
 		c := &sc.Checks[i]
 		if strings.TrimSpace(c.ID) == "" || len(c.Commands) == 0 {
 			return nil, fmt.Errorf("сценарий %s: проверка %d без id или команд", path, i+1)
 		}
+		if ids[c.ID] {
+			return nil, fmt.Errorf("сценарий %s: проверка %s объявлена дважды", path, c.ID)
+		}
+		ids[c.ID] = true
 		if c.Priority < 1 || c.Priority > 3 {
 			c.Priority = 2
 		}
@@ -130,22 +164,83 @@ func loadScenario(name string) (*scenario, error) {
 			}
 		}
 	}
+	for i := range sc.Fixes {
+		f := &sc.Fixes[i]
+		if strings.TrimSpace(f.ID) == "" || len(f.Commands) == 0 {
+			return nil, fmt.Errorf("сценарий %s: починка %d без id или команд", path, i+1)
+		}
+		for _, id := range f.Recheck {
+			if !ids[id] {
+				return nil, fmt.Errorf("сценарий %s: починка %s повторяет неизвестную проверку %q", path, f.ID, id)
+			}
+		}
+	}
+	for i := range sc.Practice {
+		p := &sc.Practice[i]
+		if strings.TrimSpace(p.Title) == "" || strings.TrimSpace(p.Text) == "" {
+			return nil, fmt.Errorf("сценарий %s: практика %d без заголовка или текста", path, i+1)
+		}
+		for _, id := range p.When {
+			if !ids[id] {
+				return nil, fmt.Errorf("сценарий %s: практика %q ссылается на неизвестную проверку %q", path, p.Title, id)
+			}
+		}
+	}
 	return &sc, nil
+}
+
+// scenarioEntry — строка каталога: что оператор видит в выборе сценария.
+type scenarioEntry struct {
+	Name         string
+	Title        string
+	Section      string
+	SectionTitle string
+}
+
+// scenarioCatalog — все сценарии рядом с бинарём, включая подкаталоги-разделы
+// (scenarios/medoc/*.json). Файл, который не загрузился, в каталог не попадает:
+// битый кейс не должен ломать меню, но и молча исчезать из списка — тоже.
+func scenarioCatalog() []scenarioEntry {
+	root := scenarioDir()
+	var out []scenarioEntry
+	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		if !strings.HasSuffix(d.Name(), ".json") || d.Name() == "manifest.json" {
+			return nil
+		}
+		rel, rerr := filepath.Rel(root, path)
+		if rerr != nil {
+			return nil
+		}
+		sc, lerr := loadScenario(rel)
+		if lerr != nil {
+			return nil
+		}
+		out = append(out, scenarioEntry{
+			Name:         strings.TrimSuffix(filepath.ToSlash(rel), ".json"),
+			Title:        sc.Title,
+			Section:      sc.Section,
+			SectionTitle: sc.SectionTitle,
+		})
+		return nil
+	})
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Section != out[j].Section {
+			return out[i].Section < out[j].Section
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out
 }
 
 // scenarioNames — что лежит рядом: для подсказки, если сценарий не найден.
 func scenarioNames() []string {
-	entries, err := os.ReadDir(scenarioDir())
-	if err != nil {
-		return nil
-	}
 	var names []string
-	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".json") && e.Name() != "manifest.json" {
-			names = append(names, strings.TrimSuffix(e.Name(), ".json"))
-		}
+	for _, e := range scenarioCatalog() {
+		names = append(names, e.Name)
 	}
-	sort.Strings(names)
 	return names
 }
 
@@ -243,4 +338,18 @@ func sortedProblems(results []checkResult) []checkResult {
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Priority < out[j].Priority })
 	return out
+}
+
+// checkByID — проверка по идентификатору: починка адресует повторную проверку
+// по id, а не по номеру в списке (номер меняется при правке сценария).
+func (sc *scenario) checkByID(id string) (scenarioCheck, bool) {
+	if sc == nil {
+		return scenarioCheck{}, false
+	}
+	for _, c := range sc.Checks {
+		if c.ID == id {
+			return c, true
+		}
+	}
+	return scenarioCheck{}, false
 }

@@ -26,7 +26,6 @@ package main
 //   - размеры и время ограничены, иначе один grep по C:\ съест сессию.
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
@@ -288,7 +287,7 @@ func argBool(args map[string]any, key string) bool {
 
 // runTool — политика + подтверждение + исполнение + журнал. Идентично
 // handleCommand для shell-команд, но на входе структурный вызов.
-func runTool(call ToolCall, reader *bufio.Reader) toolResult {
+func runTool(call ToolCall, reader lineReader) toolResult {
 	name := strings.TrimSpace(call.Function.Name)
 	res := toolResult{ID: call.ID, Name: name}
 	if name == "" {
@@ -824,7 +823,7 @@ func clipRunes(s string, n int) string {
 // ---------------------------------------------------------------------------
 
 type turnOptions struct {
-	reader   *bufio.Reader // nil — подтверждения невозможны
+	reader   lineReader // nil — подтверждения невозможны
 	maxSteps int
 }
 

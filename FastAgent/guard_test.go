@@ -143,3 +143,26 @@ func TestSystemPromptExplainsDialogue(t *testing.T) {
 		}
 	}
 }
+
+// Отказ политики обязан назвать рычаг: уровень поднимает оператор командой
+// /level 3. На прогоне 19.11.2026 (GIGA) модели говорили «нужен L3», но не
+// говорили чем — она 28 раз просила «перезапустить от администратора», хотя
+// процесс уже был повышен, и цикл не мог закончиться.
+func TestSystemPromptNamesLevelLever(t *testing.T) {
+	saved := currentLevel
+	defer func() { currentLevel = saved }()
+	currentLevel = L1Read
+
+	if p := systemPromptBase(); !strings.Contains(p, "/level") || !strings.Contains(p, "L1") {
+		t.Errorf("в промпте нет рычага уровня (/level) или текущего уровня L1")
+	}
+	for _, cmd := range []string{"bcdedit /enum all", "mycustomtool --scan --deep"} {
+		res := handleCommand(nil, Config{}, cmd)
+		if res.handled {
+			t.Fatalf("%q на L1 не должна выполняться", cmd)
+		}
+		if !strings.Contains(res.note, "/level 3") {
+			t.Errorf("отказ по %q не называет /level 3: %q", cmd, res.note)
+		}
+	}
+}

@@ -1073,7 +1073,7 @@ func extractCommands(answer string) []string {
 	return cmds
 }
 
-func confirm(reader *bufio.Reader, prompt string, word string) bool {
+func confirm(reader lineReader, prompt string, word string) bool {
 	fmt.Print(prompt)
 	line, err := reader.ReadString('\n')
 	if err != nil {
@@ -1232,7 +1232,9 @@ func main() {
 		}
 	}
 
-	reader := bufio.NewReader(os.Stdin)
+	// Один читатель stdin на сеанс: строки копятся в очереди, а пачка от
+	// вставки склеивается в одну реплику (см. input.go).
+	lines := newLineSource(os.Stdin)
 
 	fmt.Println("===================================================")
 	fmt.Println("        FASTAGENT — быстрый агент (DeepSeek-first)")
@@ -1315,11 +1317,16 @@ func main() {
 
 	for {
 		fmt.Print("\nВы > ")
-		line, err := reader.ReadString('\n')
+		turn, err := lines.ReadTurn(turnQuiet)
 		if err != nil {
 			break
 		}
-		input := strings.TrimSpace(line)
+		// Вставка многострочного вывода: строки в пределах паузы — одна реплика.
+		// Без этого каждая строка уходила бы отдельным ходом к модели.
+		if n := strings.Count(turn, "\n") + 1; n > 1 {
+			fmt.Printf("[i] вставка из %d строк — ушла одной репликой.\n", n)
+		}
+		input := strings.TrimSpace(turn)
 		if input == "" {
 			continue
 		}
@@ -1382,7 +1389,7 @@ func main() {
 			}
 			if n > currentLevel {
 				fmt.Printf("[!] Повышение доступа %s → %s подтверждаете? Введите yes: ", levelLabels[currentLevel], levelLabels[n])
-				if !confirm(reader, "", "yes") {
+				if !confirm(lines, "", "yes") {
 					fmt.Println("Отменено.")
 					continue
 				}
@@ -1509,7 +1516,7 @@ func main() {
 		var answer string
 		var provider Provider
 		var ttft time.Duration
-		history, answer, provider, ttft, err = runAgentTurn(cfg, history, turnOptions{reader: reader})
+		history, answer, provider, ttft, err = runAgentTurn(cfg, history, turnOptions{reader: lines})
 		if err != nil {
 			fmt.Printf("\n[ERROR] %v\n", err)
 			history = history[:base]
@@ -1540,7 +1547,7 @@ func main() {
 				stopped = true
 				continue
 			}
-			res := handleCommand(reader, cfg, cmd)
+			res := handleCommand(lines, cfg, cmd)
 			if !res.handled {
 				// Модель обязана знать, что команда НЕ выполнена и почему: иначе
 				// она считает её успешной и/или предлагает тот же вариант снова.
@@ -1689,6 +1696,8 @@ func systemPromptBase() string {
 		"результат приходит репликой «Вывод команды … (код N)», отказ политики — репликой «Команда … НЕ выполнена». " +
 		"Если такой реплики нет — команда НЕ выполнялась: не пиши «всё-таки выполнилась» и не приписывай запуск ни себе, ни оператору. " +
 		"Команду, которую должен выполнить человек сам (от администратора, в BIOS, вне политики), давай блоком ```cmd-manual — он только показывается, не исполняется. " +
+		fmt.Sprintf("Уровень доступа выставляет человек (сейчас L%d), и поднять его может только он командой /level N: ты этого не можешь, и «перезапустить агент от администратора» к отказу политики отношения не имеет — права процесса и уровень политики это разные вещи. ", currentLevel) +
+		"Если отказ говорит «нужен L3» или «запрещена политикой», назови это ОДИН раз: действие требует L3, поднимает его оператор командой /level 3; саму команду, если она нужна, дай блоком ```cmd-manual и жди решения — не повторяй просьбу в следующем ответе. " +
 		"Отклонённую команду не предлагай снова: допускается одна вариация, затем остановись и скажи прямо, что нужен L3 или ручной запуск. " +
 		"Обращайся к человеку напрямую, а не в третьем лице («скажи оператору», «пусть оператор»). " +
 		"Запись предлагай, только назвав машину и том, которых она касается, и сверив с целью кейса: чинить чужой диск командами про C: хоста — ошибка."
@@ -1726,7 +1735,7 @@ type cmdResult struct {
 }
 
 // handleCommand — политика + подтверждение + запуск + журнал.
-func handleCommand(reader *bufio.Reader, cfg Config, cmd string) cmdResult {
+func handleCommand(reader lineReader, cfg Config, cmd string) cmdResult {
 	cmd = strings.TrimSpace(cmd)
 	if cmd == "" {
 		return cmdResult{note: "пустая команда"}
@@ -1742,13 +1751,13 @@ func handleCommand(reader *bufio.Reader, cfg Config, cmd string) cmdResult {
 			fmt.Println("        Если она действительно нужна — поднимите уровень: /level 3 (для опасных — двойное подтверждение).")
 		}
 		logAction(currentLevel, cmd, verdict, false, -1, "")
-		return cmdResult{note: fmt.Sprintf("запрещена политикой уровня L%d", currentLevel)}
+		return cmdResult{note: fmt.Sprintf("запрещена политикой уровня L%d; снять запрет может только оператор командой /level 3", currentLevel)}
 
 	case VNotAllowed:
 		fmt.Printf("\n[BLOCK] Команды нет в белом списке уровня L%d: %s\n", currentLevel, cmd)
 		fmt.Println("        Разрешить может только уровень L3 (/level 3).")
 		logAction(currentLevel, cmd, verdict, false, -1, "")
-		return cmdResult{note: fmt.Sprintf("нет в белом списке уровня L%d (нужен L3)", currentLevel)}
+		return cmdResult{note: fmt.Sprintf("нет в белом списке уровня L%d (нужен L3); уровень поднимает только оператор командой /level 3", currentLevel)}
 
 	case VReadOnly:
 		fmt.Printf("\n[cmd] %s  (%s)\n", cmd, verdict)

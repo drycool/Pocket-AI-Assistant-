@@ -67,7 +67,8 @@ echo  [2] Чат по кейсу - проверенные действия из 
 echo  [0] Назад
 echo ---------------------------------------------------
 set "FMODE="
-set /p FMODE="Выберите действие (0-2): "
+set /p FMODE="Выберите действие (0-2, Enter - чат): "
+if not defined FMODE goto FAST_CHAT
 if "%FMODE%"=="1" goto FAST_CHAT
 if "%FMODE%"=="2" goto FAST_SCEN
 if "%FMODE%"=="0" goto MENU

@@ -41,3 +41,8 @@ Data/logs/field-run-*/
 # Сгенерированный комплект для тестирования (собирается scripts/make-fieldkit.sh:
 # бинарники + копии документов; в git не нужен, воспроизводим из дерева)
 FieldKit/
+
+# Живая диагностика: протокол и панель сессии, состояние окна
+Data/logs/diag-*.md
+Data/logs/diag-*.pane.log
+Data/diag-session.env

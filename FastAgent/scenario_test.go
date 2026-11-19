@@ -382,3 +382,94 @@ func TestScenarioMarkerRulesCatchLenovoOutput(t *testing.T) {
 		t.Error("ошибка МЕДОК/фильтра в журнале не замечена")
 	}
 }
+
+// TestStationLinkReadsStates — кейс «станция не видит сервер» должен читать
+// именно состояние сокета, а не факт «команда что-то вернула»: пустой вывод,
+// SynSent и Established — три разных вывода для оператора.
+// Полевой прогон bd3ffb: сервер видел Established от станции, а станция
+// жаловалась «нет связи» — без возраста сокета и второй стороны такой факт
+// истолковать нельзя.
+func TestStationLinkReadsStates(t *testing.T) {
+	baseDir = ".."
+	sc, err := loadScenario("medoc/station-link")
+	if err != nil {
+		t.Fatalf("medoc/station-link: %v", err)
+	}
+	find := func(id string) scenarioCheck {
+		for _, c := range sc.Checks {
+			if c.ID == id {
+				return c
+			}
+		}
+		t.Fatalf("нет проверки %s", id)
+		return scenarioCheck{}
+	}
+	link := find("station_link")
+	if !link.IgnoreExit {
+		t.Error("station_link: ignore_exit не выставлен — пустой вывод даст не тот отказ")
+	}
+	cases := []struct {
+		name   string
+		out    string
+		wantOK bool
+	}{
+		{"станция подключена",
+			"LINK: Established local=192.168.0.70:50177 remote=192.168.0.150:9996 pid=4242 age_min=12\n", true},
+		{"попытка без ответа",
+			"LINK: SynSent local=192.168.0.70:50178 remote=192.168.0.150:9996 pid=4242 age_min=\n", false},
+		{"попыток нет вовсе", "", false},
+		{"станция смотрит на другой сервер", "LINK: TimeWait local=192.168.0.70:50179 remote=192.168.1.10:9996 pid=4242 age_min=3\n", false},
+	}
+	for _, tc := range cases {
+		res := link.evaluate(tc.out, true, false)
+		if res.OK != tc.wantOK {
+			t.Errorf("%s: OK=%v, ожидалось %v (%q)", tc.name, res.OK, tc.wantOK, res.Message)
+		}
+	}
+	if res := find("station_running").evaluate("MEDOC-ST: MEDoc id=4242 path=C:\\Program Files\\Medoc\\MEDoc.exe\n", true, false); !res.OK {
+		t.Errorf("запущенная станция не распознана: %q", res.Message)
+	}
+	if res := find("station_running").evaluate("", true, false); res.OK {
+		t.Error("пустой список процессов признан запущенной станцией")
+	}
+	// Справочные проверки не должны отказывать из-за пустого вывода.
+	for _, id := range []string{"av_products", "medoc_paths"} {
+		if res := find(id).evaluate("", true, false); !res.OK {
+			t.Errorf("%s: справочная проверка отказала на пустом выводе: %q", id, res.Message)
+		}
+	}
+}
+
+// TestServerCaseKnowsSocketAge — у соединений сервера должен быть возраст, а
+// у кейса — справка про keepalive: «Established есть» само по себе ничего не
+// доказывает, доказательство — возраст сокета и вторая сторона.
+func TestServerCaseKnowsSocketAge(t *testing.T) {
+	baseDir = ".."
+	sc, err := loadScenario("medoc/server-zillya")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var conn, ka *scenarioCheck
+	for i := range sc.Checks {
+		switch sc.Checks[i].ID {
+		case "connections_9996":
+			conn = &sc.Checks[i]
+		case "keepalive":
+			ka = &sc.Checks[i]
+		}
+	}
+	if conn == nil || !strings.Contains(strings.Join(conn.Commands, " "), "age_min=") {
+		t.Fatal("connections_9996: нет возраста сокета (age_min) — «зомби-соединение» не отличить от живого")
+	}
+	out := "TCP: Listen local=0.0.0.0:9996 remote=0.0.0.0:0 pid=1084 age_min=\n" +
+		"TCP: Established local=192.168.0.150:9996 remote=192.168.0.70:50177 pid=1084 age_min=4200\n"
+	if !conn.evaluate(out, true, false).OK {
+		t.Error("Established с возрастом не распознан")
+	}
+	if ka == nil {
+		t.Fatal("нет проверки keepalive")
+	}
+	if !ka.IgnoreExit {
+		t.Error("keepalive: ignore_exit не выставлен — отсутствие значения (умолчание Windows) даст ложный отказ")
+	}
+}

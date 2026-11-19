@@ -1,0 +1,153 @@
+{
+  "name": "medoc/station-link",
+  "title": "МЕДОК Станция: не видит сервер (соединение с портом 9996)",
+  "section": "medoc",
+  "section_title": "МЕДОК",
+  "checks": [
+    {
+      "id": "powershell",
+      "title": "PowerShell 3+ доступен (нужен части проверок)",
+      "priority": 3,
+      "timeout_sec": 60,
+      "commands": [
+        "powershell -NoProfile -Command \"Get-Host | Select-Object Version\""
+      ],
+      "rules": [
+        {
+          "regex": "(?m)^\\s*([3-9]|[1-9][0-9])\\.",
+          "problem_if": "absent",
+          "message": "PowerShell младше 3 или не найден — командлеты Get-NetTCPConnection/Get-WinEvent/Get-NetFirewallRule не работают",
+          "ok_message": "PowerShell 3+ есть"
+        }
+      ],
+      "hint": "Нужен PowerShell 3+: на Windows 8+ он есть, на Windows 7 — только после обновления. Без него проверка соединений и журнала честно покажет «команда завершилась с ошибкой»."
+    },
+    {
+      "id": "station_running",
+      "title": "МЕДОК Станция запущена (процесс)",
+      "priority": 1,
+      "timeout_sec": 60,
+      "commands": [
+        "powershell -NoProfile -Command \"Get-Process | Where-Object { $_.ProcessName -match 'medoc|m\\.e\\.doc' } | ForEach-Object { try { 'MEDOC-ST: ' + $_.ProcessName + ' id=' + $_.Id + ' path=' + $_.Path } catch { 'MEDOC-ST: ' + $_.ProcessName + ' id=' + $_.Id + ' path=?' } }\""
+      ],
+      "rules": [
+        {
+          "regex": "(?m)^MEDOC-ST: ",
+          "problem_if": "absent",
+          "message": "процессов МЕДОК на станции нет — программа не запущена, и «не видит сервер» здесь не про сеть",
+          "ok_message": "МЕДОК Станция запущена"
+        }
+      ],
+      "hint": "Станция — обычное приложение, службы у неё обычно нет. Если процессов нет, дальше смотреть бессмысленно: сначала запустить станцию, потом повторить проверки."
+    },
+    {
+      "id": "station_link",
+      "title": "Соединения станции с портом 9996 (к какому серверу и в каком состоянии)",
+      "priority": 1,
+      "timeout_sec": 60,
+      "ignore_exit": true,
+      "commands": [
+        "powershell -NoProfile -Command \"Get-NetTCPConnection -RemotePort 9996 -ErrorAction SilentlyContinue | ForEach-Object { $age=''; if ($_.CreationTime) { $age=[int]((Get-Date)-$_.CreationTime).TotalMinutes }; 'LINK: ' + $_.State + ' local=' + $_.LocalAddress + ':' + $_.LocalPort + ' remote=' + $_.RemoteAddress + ':' + $_.RemotePort + ' pid=' + $_.OwningProcess + ' age_min=' + $age }\""
+      ],
+      "rules": [
+        {
+          "regex": "(?m)^LINK: SynSent ",
+          "message": "станция отправляет SYN, а соединение не устанавливается: ответ не приходит — трафик режет фильтр на станции, неверный маршрут/шлюз или сервер не слушает 9996"
+        },
+        {
+          "regex": "(?m)^LINK: Established ",
+          "problem_if": "absent",
+          "message": "у станции нет ни одного установленного соединения с портом 9996 — она не видит сервер (адрес в настройках станции, фильтр или сервер недоступен)",
+          "ok_message": "станция подключена к серверу"
+        }
+      ],
+      "hint": "Строки читаются так: remote= — адрес сервера, к которому реально обращается станция (сверьте с тем, что назвал клиент; станция может смотреть на старый адрес после переустановки); age_min= — сколько минут живёт соединение; SynSent — попытка есть, ответа нет; строк нет вовсе — станция даже не пытается подключиться. Проверка идёт через Get-NetTCPConnection, а не пробный коннект: на машине с антивирусом Test-NetConnection занимал 84 с."
+    },
+    {
+      "id": "station_errors",
+      "title": "Ошибки станции в журнале Application",
+      "priority": 2,
+      "timeout_sec": 120,
+      "commands": [
+        "powershell -NoProfile -Command \"Get-WinEvent -FilterHashtable @{LogName='Application'; Level=1,2} -MaxEvents 120 -ErrorAction SilentlyContinue | Where-Object { $_.Message -match 'medoc|m\\.e\\.doc|9996|zillya' } | ForEach-Object { $app=''; if ($_.Properties.Count -gt 0) { $app=[string]$_.Properties[0].Value }; 'STERR: ' + $_.TimeCreated.ToString('MM-dd HH:mm') + ' id=' + $_.Id + ' ' + $_.ProviderName + ' app=' + $app }\""
+      ],
+      "rules": [
+        {
+          "regex": "(?m)^STERR: ",
+          "message": "в журнале Application ошибки станции: {n}",
+          "ok_message": "свежих ошибок станции нет"
+        }
+      ],
+      "hint": "Смотреть app=: это путь упавшего приложения (для id=1000 — его exe). Если станция падает при попытке подключиться, «не видит сервер» — следствие падения, а не причина."
+    },
+    {
+      "id": "av_products",
+      "title": "Какие антивирусы стоят на станции",
+      "priority": 3,
+      "timeout_sec": 120,
+      "ignore_exit": true,
+      "commands": [
+        "powershell -NoProfile -Command \"Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntiVirusProduct -ErrorAction SilentlyContinue | ForEach-Object { 'AV: ' + $_.displayName }\""
+      ],
+      "rules": [],
+      "hint": "Справочно: если на станции тоже стоит фильтрующий антивирус (Zillya, ESET, Defender с сетевым экраном), первым делом проверять его правила для станции — тот же класс проблемы, что и на сервере."
+    },
+    {
+      "id": "fw_rules",
+      "title": "Правила брандмауэра Windows для станции",
+      "priority": 2,
+      "timeout_sec": 120,
+      "commands": [
+        "powershell -NoProfile -Command \"Get-NetFirewallRule | Where-Object { $_.DisplayName -match 'medoc|m\\.e\\.doc' } | ForEach-Object { 'FW: ' + $_.DisplayName + ' action=' + $_.Action + ' dir=' + $_.Direction + ' enabled=' + $_.Enabled }\""
+      ],
+      "rules": [
+        {
+          "regex": "(?m)^FW: .*action=Block",
+          "message": "в брандмауэре Windows блокирующие правила для станции: {n}",
+          "ok_message": "блокирующих правил Windows для станции нет"
+        }
+      ],
+      "hint": "Правило Block отключается вручную: wf.msc → «Правила для исходящего подключения» → найти по имени. Для станции опаснее исходящие правила: она сама обращается к серверу."
+    },
+    {
+      "id": "medoc_paths",
+      "title": "Где лежит МЕДОК на станции и когда обновлялся",
+      "priority": 3,
+      "timeout_sec": 60,
+      "ignore_exit": true,
+      "commands": [
+        "powershell -NoProfile -Command \"Get-ChildItem 'C:\\Program Files\\Medoc','C:\\Program Files (x86)\\Medoc','C:\\Program Files\\M.E.Doc','C:\\Program Files (x86)\\M.E.Doc' -ErrorAction SilentlyContinue | ForEach-Object { 'MEDOC-PATH: ' + $_.Name + ' ' + $_.LastWriteTime }\""
+      ],
+      "rules": [],
+      "hint": "После обновления станции exe может переехать: правило антивируса, заведённое по старому пути, перестаёт совпадать и начинает блокировать станцию. Сверьте даты с датой, когда «всё сломалось»."
+    }
+  ],
+  "fixes": [],
+  "practice": [
+    {
+      "when": [
+        "station_link"
+      ],
+      "title": "Порядок разбора «станция не видит сервер»",
+      "text": "Сначала сопоставить две стороны. На сервере — проверка «Состояние соединений с 9996»: есть ли Established от адреса этой станции и какой возраст (`age_min`) у этого соединения. На станции — эта проверка: `remote=` показывает, к какому адресу станция реально обращается.\n\nДальше по состоянию:\n1) Строк нет вовсе — станция не подключалась. Смотреть адрес сервера в настройках станции (после переустановки там остаётся старый адрес) и профиль сети (частная/общественная), на котором правила брандмауэра могут не применяться.\n2) SynSent — SYN уходит, ответа нет. Значит блокирует фильтр на станции (антивирус с сетевым экраном, брандмауэр Windows) или станция вообще не в той подсети. На сервере в это время будет Listen без Established от этой станции.\n3) Established есть, а станция пишет «нет связи», и на сервере в это же время Established от её адреса висит с большим `age_min` — это зомби-соединение: клиент давно умер, сервер держит мёртвый сокет. Лечится перезапуском МЕДОК Сервер (кейс «МЕДОК Сервер: порт 9996») и проверкой, что станция после этого подключилась заново.\n4) Established есть у станции, но на сервере его нет, и адрес в `remote=` не тот, что назвал клиент — станция стучится не в тот сервер."
+    },
+    {
+      "when": [
+        "station_errors"
+      ],
+      "title": "Если станция падает",
+      "text": "Из проверки «Ошибки станции» взять app= — путь exe. Если это станция и она падает при подключении: посмотреть, что было перед падением (попытка входа, отправка документа), и проверить, отвечает ли сервер.\nОтдельно: падение сразу после обновления станции обычно лечит переустановка поверх с сохранением базы, но это уже не чтение — решение за оператором."
+    },
+    {
+      "when": [
+        "fw_rules"
+      ],
+      "title": "Блокирующие правила на станции",
+      "text": "Отключить правило Block для станции (wf.msc). Если стоит антивирус со своим сетевым экраном, правила Windows часто не при чём: смотреть правила в самом антивирусе и заводить их по ТЕКУЩИМ путям — после обновления старый путь не совпадает."
+    },
+    {
+      "title": "Что считается доказанным",
+      "text": "«Не видит сервер» — это утверждение станции, а не факт сети. Факт даёт только пара наблюдений: состояние сокета на станции и состояние сокета на сервере одновременно.\nЕсли на станции Established к 9996 и на сервере Established от её адреса — сеть в порядке, искать причину выше (сессия, учётка, база).\nЕсли на одной стороне Established, а на другой ничего — соединение-зомби или подмена адреса, см. порядок разбора.\nЕсли на обеих сторонах пусто — станция не пытается или не может выйти: адрес, маршрут, фильтр."
+    }
+  ]
+}

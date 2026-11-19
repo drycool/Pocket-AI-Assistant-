@@ -272,3 +272,87 @@ func TestSetResultReplacesByID(t *testing.T) {
 		t.Fatalf("новая проверка не добавилась: %+v", st.results)
 	}
 }
+
+// Правила, которые на живом прогоне 19.11.2026 молчали: журналы не читались
+// (wevtutil рвал XPath с пробелами), службы обрезались таблицей до «ed», отчёты
+// WER считались только по .dmp. Здесь — тот же вывод Lenovo, но уже с маркерами.
+func TestScenarioMarkerRulesCatchLenovoOutput(t *testing.T) {
+	baseDir = ".."
+	find := func(sc *scenario, id string) scenarioCheck {
+		for _, c := range sc.Checks {
+			if c.ID == id {
+				return c
+			}
+		}
+		t.Fatalf("нет проверки %s", id)
+		return scenarioCheck{}
+	}
+
+	win, err := loadScenario("standard-windows")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name   string
+		check  scenarioCheck
+		out    string
+		wantOK bool
+	}{
+		{"ошибки System", find(win, "errors_system"),
+			"ERR: 11-19 08:30 id=41 Service Control Manager\n", false},
+		{"ошибки System — чисто", find(win, "errors_system"), "", true},
+		{"ошибки Application", find(win, "errors_app"),
+			"ERR: 11-19 08:31 id=1000 Application Error\n", false},
+		{"службы", find(win, "services"),
+			"STOPPED: edgeupdate / Microsoft Edge Update Service (edgeupdate)\nSTOPPED: WSLService / WSL Service\n", false},
+		{"службы работают", find(win, "services"), "", true},
+		{"место на C:", find(win, "disk_low"), "LOW SPACE: C: свободно 9.3 ГБ из 111.2\n", false},
+		{"крупный файл", find(win, "large_files"),
+			"C:\\Users\\Admin\\Downloads\\GDS2 2023.10.19.rar 757968124\n", false},
+		{"нет крупных файлов", find(win, "large_files"),
+			"C:\\Users\\Admin\\Downloads\\Git-2.52.0-64-bit.exe 66292520\n", true},
+		{"отчёты WER", find(win, "wer"),
+			"CRASH: AppCrash_explorer.exe_5149\nCRASH: Critical_10.0.19041\n", false},
+		{"дампы WER", find(win, "wer"), "DUMP: 111926-01.dmp\n", false},
+	}
+	for _, tc := range cases {
+		res := tc.check.evaluate(tc.out, true, false)
+		if res.OK != tc.wantOK {
+			t.Errorf("%s: OK=%v, ожидалось %v (сообщение %q)", tc.name, res.OK, tc.wantOK, res.Message)
+		}
+	}
+
+	mail, err := loadScenario("medoc/imap-ukrnet")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res := find(mail, "mail_errors").evaluate("MAILERR: 11-19 08:34 id=2 Schannel\n", true, false); res.OK {
+		t.Error("ошибка почты/SSL в журнале не замечена")
+	}
+	if res := find(mail, "mail_errors").evaluate("обычная строка\n", true, false); !res.OK {
+		t.Errorf("чистый журнал признан проблемой: %q", res.Message)
+	}
+	if res := find(mail, "medoc_running").evaluate("", true, false); res.OK {
+		t.Error("пустой список процессов должен означать «МЕДОК не запущен»")
+	}
+	if res := find(mail, "medoc_running").evaluate("MEDOC-RUN: medoc id=4242\n", true, false); !res.OK {
+		t.Error("запущенный МЕДОК не распознан")
+	}
+
+	srv, err := loadScenario("medoc/server-zillya")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res := find(srv, "medoc_service").evaluate("MEDOC-SVC: MEDocServer status=Stopped start=Automatic\n", true, false); res.OK {
+		t.Error("остановленная служба МЕДОК признана работающей")
+	}
+	if res := find(srv, "medoc_service").evaluate("MEDOC-SVC: MEDocServer status=Running start=Automatic\n", true, false); !res.OK {
+		t.Errorf("работающая служба МЕДОК не распознана: %q", res.Message)
+	}
+	if res := find(srv, "fw_rules").evaluate("FW: Правило МЕДОК action=Block dir=Outbound enabled=True\n", true, false); res.OK {
+		t.Error("блокирующее правило брандмауэра не замечено")
+	}
+	if res := find(srv, "app_errors").evaluate("APPERR: 11-19 08:35 id=10013 Zillya\n", true, false); res.OK {
+		t.Error("ошибка МЕДОК/фильтра в журнале не замечена")
+	}
+}

@@ -28,11 +28,11 @@
       "priority": 1,
       "timeout_sec": 60,
       "commands": [
-        "powershell -NoProfile -Command \"Get-Service | Where-Object { $_.Name -match 'medoc|e\\.doc' } | Select-Object Name,DisplayName,Status,StartType\""
+        "powershell -NoProfile -Command \"Get-Service | Where-Object { $_.Name -match 'medoc|e\\.doc' } | ForEach-Object { 'MEDOC-SVC: ' + $_.Name + ' status=' + $_.Status + ' start=' + $_.StartType }\""
       ],
       "rules": [
         {
-          "regex": "(?m)\\bRunning\\b",
+          "regex": "(?m)^MEDOC-SVC: .*status=Running",
           "problem_if": "absent",
           "message": "служба МЕДОК не найдена или остановлена — сервер не принимает соединения",
           "ok_message": "служба МЕДОК работает"
@@ -82,11 +82,11 @@
       "priority": 3,
       "timeout_sec": 60,
       "commands": [
-        "powershell -NoProfile -Command \"Get-Service | Where-Object { $_.Name -match 'zillya' -or $_.DisplayName -match 'zillya' } | Select-Object Name,DisplayName,Status\""
+        "powershell -NoProfile -Command \"Get-Service | Where-Object { $_.Name -match 'zillya' -or $_.DisplayName -match 'zillya' } | ForEach-Object { 'ZILLYA-SVC: ' + $_.Name + ' status=' + $_.Status }\""
       ],
       "rules": [
         {
-          "regex": "(?m)\\bRunning\\b",
+          "regex": "(?m)^ZILLYA-SVC: .*status=Running",
           "problem_if": "absent",
           "message": "Zillya не найдена или не запущена — причина, скорее всего, не в ней",
           "ok_message": "Zillya работает"
@@ -100,11 +100,11 @@
       "priority": 2,
       "timeout_sec": 120,
       "commands": [
-        "powershell -NoProfile -Command \"Get-NetFirewallRule | Where-Object { $_.DisplayName -match 'medoc|zillya' } | Select-Object DisplayName,Direction,Action,Enabled,Profile\""
+        "powershell -NoProfile -Command \"Get-NetFirewallRule | Where-Object { $_.DisplayName -match 'medoc|zillya' } | ForEach-Object { 'FW: ' + $_.DisplayName + ' action=' + $_.Action + ' dir=' + $_.Direction + ' enabled=' + $_.Enabled }\""
       ],
       "rules": [
         {
-          "regex": "(?m)\\bBlock\\b",
+          "regex": "(?m)^FW: .*action=Block",
           "message": "в брандмауэре Windows есть блокирующие правила для МЕДОК: {n}",
           "ok_message": "блокирующих правил Windows для МЕДОК нет"
         }
@@ -117,11 +117,11 @@
       "priority": 2,
       "timeout_sec": 120,
       "commands": [
-        "wevtutil qe Application /c:60 /rd:true /f:text /q:*[System[(Level=1 or Level=2)]]"
+        "powershell -NoProfile -Command \"Get-WinEvent -FilterHashtable @{LogName='Application'; Level=1,2} -MaxEvents 120 -ErrorAction SilentlyContinue | Where-Object { $_.Message -match 'medoc|9996|zillya|firewall|access is denied' } | ForEach-Object { 'APPERR: ' + $_.TimeCreated.ToString('MM-dd HH:mm') + ' id=' + $_.Id + ' ' + $_.ProviderName }\""
       ],
       "rules": [
         {
-          "regex": "(?i)(medoc|9996|zillya|firewall|брандмауэр|access is denied)",
+          "regex": "(?m)^APPERR: ",
           "message": "в журнале Application ошибки МЕДОК или фильтра: {n}",
           "ok_message": "свежих ошибок МЕДОК/фильтра нет"
         }

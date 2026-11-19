@@ -28,11 +28,11 @@
       "priority": 3,
       "timeout_sec": 60,
       "commands": [
-        "powershell -NoProfile -Command \"Get-Process | Where-Object { $_.ProcessName -match 'medoc' } | Select-Object ProcessName,Id\""
+        "powershell -NoProfile -Command \"Get-Process | Where-Object { $_.ProcessName -match 'medoc' } | ForEach-Object { 'MEDOC-RUN: ' + $_.ProcessName + ' id=' + $_.Id }\""
       ],
       "rules": [
         {
-          "regex": "(?i)medoc",
+          "regex": "(?m)^MEDOC-RUN: ",
           "problem_if": "absent",
           "message": "МЕДОК не запущен: программа закрыта, письма сами не уйдут",
           "ok_message": "МЕДОК запущен"
@@ -98,11 +98,11 @@
       "priority": 2,
       "timeout_sec": 120,
       "commands": [
-        "wevtutil qe Application /c:60 /rd:true /f:text /q:*[System[(Level=1 or Level=2)]]"
+        "powershell -NoProfile -Command \"Get-WinEvent -FilterHashtable @{LogName='Application'; Level=1,2} -MaxEvents 120 -ErrorAction SilentlyContinue | Where-Object { $_.Message -match 'medoc|imap|smtp|ssl|tls|сертификат' } | ForEach-Object { 'MAILERR: ' + $_.TimeCreated.ToString('MM-dd HH:mm') + ' id=' + $_.Id + ' ' + $_.ProviderName }\""
       ],
       "rules": [
         {
-          "regex": "(?i)(medoc|imap|smtp|ssl|tls|сертификат|certificate)",
+          "regex": "(?m)^MAILERR: ",
           "message": "в журнале Application ошибки, связанные с почтой или SSL: {n}",
           "ok_message": "свежих ошибок МЕДОК/SSL нет"
         }

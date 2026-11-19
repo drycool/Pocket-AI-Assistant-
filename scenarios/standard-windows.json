@@ -30,13 +30,13 @@
       "priority": 1,
       "timeout_sec": 60,
       "commands": [
-        "powershell -NoProfile -Command \"Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' | Where-Object { $_.FreeSpace / $_.Size -lt 0.1 } | ForEach-Object { 'LOW SPACE: ' + $_.DeviceID } \""
+        "powershell -NoProfile -Command \"Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' | Where-Object { $_.Size -gt 0 -and $_.FreeSpace / $_.Size -lt 0.1 } | ForEach-Object { 'LOW SPACE: ' + $_.DeviceID + ' свободно ' + [math]::Round($_.FreeSpace/1GB,1) + ' ГБ из ' + [math]::Round($_.Size/1GB,1) }\""
       ],
       "rules": [
         {
           "regex": "LOW SPACE: [A-Z]:",
           "problem_if": "found",
-          "message": "диск с запасом меньше 10 %: {n}",
+          "message": "диск с запасом меньше 10 %: {n} — предложить клиенту освободить место (крупные файлы ниже)",
           "ok_message": "запаса на дисках достаточно"
         }
       ]
@@ -49,7 +49,14 @@
       "commands": [
         "powershell -NoProfile -Command \"Get-ChildItem $env:USERPROFILE\\Downloads,$env:USERPROFILE\\Documents,$env:USERPROFILE\\Desktop -Recurse -File -ErrorAction SilentlyContinue | Sort-Object Length -Descending | Select-Object -First 10 FullName,Length\""
       ],
-      "rules": []
+      "rules": [
+        {
+          "regex": "\\s([5-9]\\d{8}|\\d{10,})\\s*$",
+          "problem_if": "found",
+          "message": "файлов крупнее 500 МБ в профиле: {n} — предложить клиенту перенести или удалить вручную (агент ничего не удаляет)",
+          "ok_message": "крупных файлов в профиле нет"
+        }
+      ]
     },
     {
       "id": "errors_system",
@@ -57,11 +64,11 @@
       "priority": 1,
       "timeout_sec": 120,
       "commands": [
-        "wevtutil qe System /c:40 /rd:true /f:text /q:*[System[(Level=1 or Level=2)]]"
+        "powershell -NoProfile -Command \"Get-WinEvent -FilterHashtable @{LogName='System'; Level=1,2} -MaxEvents 40 -ErrorAction SilentlyContinue | ForEach-Object { 'ERR: ' + $_.TimeCreated.ToString('MM-dd HH:mm') + ' id=' + $_.Id + ' ' + $_.ProviderName }\""
       ],
       "rules": [
         {
-          "regex": "(?m)^\\s*Level:\\s*[12]\\b",
+          "regex": "(?m)^ERR: ",
           "problem_if": "found",
           "message": "критических ошибок в System: {n}",
           "ok_message": "критических ошибок в System нет"
@@ -74,11 +81,11 @@
       "priority": 1,
       "timeout_sec": 120,
       "commands": [
-        "wevtutil qe Application /c:40 /rd:true /f:text /q:*[System[(Level=1 or Level=2)]]"
+        "powershell -NoProfile -Command \"Get-WinEvent -FilterHashtable @{LogName='Application'; Level=1,2} -MaxEvents 40 -ErrorAction SilentlyContinue | ForEach-Object { 'ERR: ' + $_.TimeCreated.ToString('MM-dd HH:mm') + ' id=' + $_.Id + ' ' + $_.ProviderName }\""
       ],
       "rules": [
         {
-          "regex": "(?m)^\\s*Level:\\s*[12]\\b",
+          "regex": "(?m)^ERR: ",
           "problem_if": "found",
           "message": "критических ошибок в Application: {n}",
           "ok_message": "критических ошибок в Application нет"
@@ -92,15 +99,19 @@
       "timeout_sec": 60,
       "ignore_exit": true,
       "commands": [
-        "dir C:\\ProgramData\\Microsoft\\Windows\\WER\\ReportArchive /b",
-        "dir C:\\Windows\\Minidump /b"
+        "powershell -NoProfile -Command \"Get-ChildItem 'C:\\ProgramData\\Microsoft\\Windows\\WER\\ReportArchive' -Directory -ErrorAction SilentlyContinue | Select-Object -First 20 | ForEach-Object { 'CRASH: ' + $_.Name }; Get-ChildItem 'C:\\Windows\\Minidump' -File -Filter *.dmp -ErrorAction SilentlyContinue | ForEach-Object { 'DUMP: ' + $_.Name }\""
       ],
       "rules": [
         {
-          "regex": "(?i)\\.dmp\\s*$",
+          "regex": "(?m)^CRASH: ",
           "problem_if": "found",
-          "message": "дампов сбоев: {n}",
-          "ok_message": "дампов сбоев нет"
+          "message": "отчётов о сбоях в WER: {n} — посмотреть, какой процесс падал чаще (это важнее одного дампа)",
+          "ok_message": "отчётов о сбоях WER нет"
+        },
+        {
+          "regex": "(?m)^DUMP: ",
+          "problem_if": "found",
+          "message": "дампов сбоев: {n}"
         }
       ]
     },
@@ -129,11 +140,11 @@
       "priority": 2,
       "timeout_sec": 90,
       "commands": [
-        "powershell -NoProfile -Command \"Get-Service | Where-Object { $_.StartType -eq 'Automatic' -and $_.Status -ne 'Running' } | Select-Object Name,DisplayName,Status\""
+        "powershell -NoProfile -Command \"Get-Service | Where-Object { $_.StartType -eq 'Automatic' -and $_.Status -ne 'Running' } | ForEach-Object { 'STOPPED: ' + $_.Name + ' / ' + $_.DisplayName }\""
       ],
       "rules": [
         {
-          "regex": "(?m)\\bStopped\\b",
+          "regex": "(?m)^STOPPED: ",
           "problem_if": "found",
           "message": "служб с автозапуском не работает: {n}",
           "ok_message": "службы с автозапуском работают"

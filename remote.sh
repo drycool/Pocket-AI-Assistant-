@@ -6,6 +6,8 @@
 #   ./remote.sh stop       остановить брокер
 #   ./remote.sh log        хвост журнала брокера
 #   ./remote.sh secret     показать секрет (он же хранится в Data/remote-secret.txt)
+#   ./remote.sh ticket [куда]  путь к свежему файлу-билету; с каталогом — скопировать туда
+#   ./remote.sh clean [N]  оставить N свежих билетов (по умолчанию 3), старые удалить
 #
 # Секрет создаётся один раз и лежит в Data/remote-secret.txt (chmod 600);
 # передавать его руками не нужно. Пути считаются от каталога этого файла,
@@ -128,6 +130,38 @@ cmd_stop() {
   echo "[OK] остановлен"
 }
 
+newest_ticket() { ls -t "$TICKETS"/fastagent-*.exe 2>/dev/null | head -1; }
+
+cmd_ticket() {
+  local t dest="${1:-}"
+  t="$(newest_ticket || true)"
+  if [[ -z "$t" ]]; then
+    echo "[!] файлов-билетов ещё нет: они появляются, когда оператор создаёт сессию" >&2
+    echo "    запустите: remote   (или $ROOT/remote.sh)" >&2
+    exit 1
+  fi
+  echo "$t"
+  [[ -n "$dest" ]] || return 0
+  [[ -d "$dest" ]] || die "нет каталога: $dest"
+  cp -f "$t" "$dest/" || die "не удалось скопировать в $dest"
+  echo "[OK] скопирован: $dest/$(basename "$t")"
+}
+
+cmd_clean() {
+  local keep="${1:-3}" n i
+  [[ "$keep" =~ ^[0-9]+$ ]] || die "сколько оставить? число: remote clean 3"
+  mapfile -t all < <(ls -t "$TICKETS"/fastagent-*.exe 2>/dev/null)
+  n="${#all[@]}"
+  if (( n <= keep )); then
+    echo "[=] билетов $n — удалять нечего (оставляю $keep)"
+    return 0
+  fi
+  for (( i = keep; i < n; i++ )); do
+    rm -f -- "${all[$i]}" && echo "[-] ${all[$i]}"
+  done
+  echo "[OK] оставлено $keep из $n"
+}
+
 cmd_new() {
   local e s
   e="$(exe)"; s="$(secret)"
@@ -150,6 +184,8 @@ usage() {
   ./remote.sh stop       остановить брокер
   ./remote.sh log [N]    хвост журнала брокера (по умолчанию 40 строк)
   ./remote.sh secret     показать секрет
+  ./remote.sh ticket [куда]  путь к свежему файлу-билету; с каталогом — копия туда
+  ./remote.sh clean [N]  оставить N свежих билетов (по умолчанию 3)
   ./remote.sh help       эта справка
 
 Секрет создаётся один раз: Data/remote-secret.txt (chmod 600).
@@ -164,6 +200,8 @@ case "${1:-new}" in
   stop)     cmd_stop ;;
   log)      tail -n "${2:-40}" "$BROKER_LOG" ;;
   secret)   secret; echo ;;
+  ticket|copy) shift || true; cmd_ticket "${1:-}" ;;
+  clean)    shift || true; cmd_clean "${1:-3}" ;;
   -h|--help|help) usage ;;
   *) die "неизвестная команда: $1 (см. ./remote.sh help)" ;;
 esac

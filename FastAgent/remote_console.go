@@ -24,7 +24,8 @@ import (
 
 // consoleHelp — что можно в консоли оператора.
 const consoleHelp = `Команды консоли (R1–R4):
-  diag                                  снимок системы гостя
+  quick                                 быстрый снимок: ОС, память, диск, порты, ошибки (20 с)
+  diag                                  подробный снимок системы гостя
   read <путь>                           прочитать файл
   grep <шаблон> [каталог] [glob]        поиск по содержимому
   glob <шаблон> [каталог]               поиск файлов по имени
@@ -32,6 +33,7 @@ const consoleHelp = `Команды консоли (R1–R4):
   get <путь на госте> [локальный путь]  забрать файл (R3, до 50 МиБ)
   put <локальный файл> <путь на госте>  положить файл (R3, до 50 МиБ)
   journal [N]                           последние N строк журнала гостя (R4)
+  report [текст]                        отчёт в ОКНО КЛИЕНТА (без текста — авто-сводка)
   save [заметка]                        архив сессии в Data/logs + уроки (R4)
   status | help | quit                  состояние / справка / выход
 
@@ -612,6 +614,26 @@ func remoteRunParsed(reader *bufio.Reader, base, secret, code string, key []byte
 		}
 		arch.Add(line, "get_file", remoteResult{OK: true, Out: "получено: " + dst})
 		return true
+	case "report":
+		// Отчёт клиенту: текст задаёт оператор; без текста — авто-сводка из
+		// архива (сколько шагов, отказов, чем кончилось). Гость печатает её в
+		// своём окне, поэтому оператору возвращается только подтверждение.
+		var a struct {
+			Text string `json:"text"`
+		}
+		_ = json.Unmarshal(args, &a)
+		if strings.TrimSpace(a.Text) == "" {
+			a.Text = arch.ClientReport()
+		}
+		raw, _ := json.Marshal(a)
+		res, ok := remoteSubmit(reader, base, secret, code, key, "report", raw, events)
+		if ok {
+			remotePrintResult(res)
+		}
+		if ok || res.ID != "" {
+			arch.Add(line, "report", res)
+		}
+		return ok
 	case "put_file":
 		var a struct {
 			Path  string `json:"path"`
@@ -696,6 +718,15 @@ func parseRemoteCommand(line string) (kind string, args json.RawMessage, quit bo
 		return "close", nil, true, nil
 	case "diag":
 		return "diag", nil, false, nil
+	case "quick", "probe":
+		// Быстрые проверки: без аргументов и без подтверждения — только чтение.
+		return "quick", nil, false, nil
+	case "report", "say":
+		// Текст отчёта — остаток строки как есть: это фраза для клиента, а не
+		// команда. Без текста оператор получает авто-сводку из архива сессии.
+		text := strings.TrimSpace(line[len(fields[0]):])
+		raw, _ := json.Marshal(map[string]any{"text": text})
+		return "report", raw, false, nil
 	case "read", "cat", "read_file":
 		if len(fields) < 2 {
 			return "", nil, false, fmt.Errorf("использование: read <путь>")

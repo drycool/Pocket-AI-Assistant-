@@ -421,6 +421,9 @@ var (
 	logsDir     string
 	configFile  string
 	actionsLog  string
+	// chatScenario — кейс, из которого агенту подгружены проверенные действия
+	// (локальная «RAG-база»: на чужой машине памяти Jev нет, а команды нужны).
+	chatScenario *scenario
 )
 
 func initPaths() {
@@ -1132,7 +1135,7 @@ func main() {
 	plainFlag := flag.Bool("plain", false,
 		"оператор: обычная консоль команд вместо меню R5")
 	scenarioFlag := flag.String("scenario", "",
-		"R5: сценарий из scenarios/ (по умолчанию standard-windows)")
+		"сценарий из scenarios/: в меню оператора — регламент, в чате агента — проверенные действия")
 	memoryDirFlag := flag.String("memory-dir", os.Getenv("JEV_MEMORY_DIR"),
 		"R4: корпус памяти Jev для уроков сессии (по умолчанию JEV_MEMORY_DIR; пусто — только txt-архив)")
 	reindexFlag := flag.Bool("reindex", false,
@@ -1204,6 +1207,18 @@ func main() {
 
 	toolsEnabled = true
 	initMCP(cfg)
+	if name := strings.TrimSpace(*scenarioFlag); name != "" {
+		if sc, err := loadScenario(name); err != nil {
+			fmt.Printf("[!] кейс не загружен: %v\n", err)
+			if names := scenarioNames(); len(names) > 0 {
+				fmt.Printf("[i] рядом есть: %s\n", strings.Join(names, ", "))
+			}
+		} else {
+			chatScenario = sc
+			fmt.Printf("[i] проверенные действия: %s / %s (проверок %d, починок %d)\n",
+				sc.SectionTitle, sc.Title, len(sc.Checks), len(sc.Fixes))
+		}
+	}
 
 	reader := bufio.NewReader(os.Stdin)
 
@@ -1301,9 +1316,41 @@ func main() {
 			fmt.Println("\n[OK] Сессия сохранена. Выход.")
 			return
 
+		case strings.HasPrefix(low, "/scenario"):
+			// Локальная база проверенных действий: кейс грузится в системный
+			// промпт, чтобы агент опирался на команды, которые уже сработали,
+			// а не сочинял новые. На чужой машине Jev недоступен — это и есть
+			// замена RAG на флешке.
+			parts := strings.Fields(input)
+			if len(parts) == 1 {
+				if chatScenario == nil {
+					fmt.Println("Кейс не загружен. /scenario <имя> — например standard-windows или learned/remote-…")
+					if names := scenarioNames(); len(names) > 0 {
+						fmt.Println("[i] рядом: " + strings.Join(names, ", "))
+					}
+				} else {
+					fmt.Printf("[i] кейс: %s / %s (проверок %d, починок %d)\n",
+						chatScenario.SectionTitle, chatScenario.Title, len(chatScenario.Checks), len(chatScenario.Fixes))
+				}
+				continue
+			}
+			name := strings.TrimSpace(input[len(parts[0]):])
+			sc, serr := loadScenario(name)
+			if serr != nil {
+				fmt.Printf("[!] %v\n", serr)
+				if names := scenarioNames(); len(names) > 0 {
+					fmt.Println("[i] рядом: " + strings.Join(names, ", "))
+				}
+				continue
+			}
+			chatScenario = sc
+			fmt.Printf("[OK] проверенные действия: %s / %s (проверок %d, починок %d)\n",
+				sc.SectionTitle, sc.Title, len(sc.Checks), len(sc.Fixes))
+			continue
+
 		case low == "/help":
 			fmt.Println("L0 чат | L1 чтение | L2 безопасные починки | L3 полный доступ")
-			fmt.Println("/level N, /diag, /report, /rag <вопрос> [/rag graph <вопрос>], /fb <вердикт>, /follow on|off, /clear, exit")
+			fmt.Println("/level N, /diag, /scenario <кейс>, /report, /rag <вопрос> [/rag graph <вопрос>], /fb <вердикт>, /follow on|off, /clear, exit")
 			continue
 
 		case strings.HasPrefix(low, "/level"):
@@ -1559,6 +1606,8 @@ func systemPrompt() string {
 	if toolsEnabled {
 		base += " " + toolSystemPrompt()
 	}
+	// Проверенные действия едут вместе с кейсом: на госте памяти Jev нет.
+	base += scenarioContext()
 	return base
 }
 

@@ -200,6 +200,30 @@ func remoteExec(c remoteCmd) execOutcome {
 		logRemoteAction("journal", VReadOnly, true, out)
 		return execOutcome{out: truncate(out, remoteMaxResultSize), exit: rc, ok: true}
 	}
+	if c.Kind == "quick" {
+		// Быстрые проверки: один короткий снимок вместо длинного diag. Только
+		// чтение — ни одна из команд в quickWindows/quickLinux не меняет систему.
+		out, rc, err := runQuickProbe()
+		if err != nil {
+			logRemoteAction("quick", VReadOnly, false, err.Error())
+			return execOutcome{out: "ошибка быстрых проверок: " + err.Error(), exit: -1}
+		}
+		logRemoteAction("quick", VReadOnly, true, out)
+		return execOutcome{out: truncate(out, remoteMaxResultSize), exit: rc, ok: true}
+	}
+	if c.Kind == "report" {
+		// Отчёт оператора выводится в консоль КЛИЕНТА: он смотрит на своё окно,
+		// а не на наш терминал. Поэтому печатаем здесь, на госте, и возвращаем
+		// оператору только подтверждение, что текст дошёл до экрана.
+		text, _ := args["text"].(string)
+		text = strings.TrimSpace(text)
+		if text == "" {
+			text = "Проверка закончена. Подробности оператор пришлёт отдельно."
+		}
+		printGuestReport(text)
+		logRemoteAction("report", VReadOnly, true, "отчёт выведен в консоль гостя")
+		return execOutcome{out: "отчёт выведен на терминал клиента", ok: true}
+	}
 	verdict := classifyTool(c.Kind, L1Read)
 	if verdict != VReadOnly && !c.Approved {
 		msg := fmt.Sprintf("R3: инструмент %q удалённо недоступен (только чтение)", c.Kind)

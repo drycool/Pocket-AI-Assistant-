@@ -116,6 +116,32 @@ func (a *sessionArchive) takeGuestJournal(out string) {
 	}
 }
 
+// ClientReport — короткий отчёт «что сделано» для ОКНА КЛИЕНТА. Без путей,
+// команд и жаргона: это текст, который человек читает с экрана, а не оператор.
+// Цифры берутся из тех же счётчиков, что и в архив: два источника правды здесь
+// не нужны, иначе «шагов 9» в отчёте и в архиве разойдутся.
+func (a *sessionArchive) ClientReport() string {
+	if a == nil {
+		return "Проверка закончена."
+	}
+	steps, refused, _, _ := a.counts()
+	host := firstNonEmpty(a.GuestHost, "этот компьютер")
+	var b strings.Builder
+	fmt.Fprintf(&b, "Компьютер: %s\n", host)
+	fmt.Fprintf(&b, "Дата проверки: %s\n", time.Now().Format("02.01.2006 15:04"))
+	fmt.Fprintf(&b, "Выполнено шагов: %d.\n", steps)
+	if refused > 0 {
+		fmt.Fprintf(&b, "Отказов защиты: %d — это нормально: опасные действия не выполнялись.\n", refused)
+	}
+	if note := strings.TrimSpace(a.lastNote); note != "" {
+		fmt.Fprintf(&b, "Итог: %s.\n", strings.TrimRight(note, ". "))
+	} else {
+		b.WriteString("Итог: проверка выполнена, подробный отчёт пришлёт оператор.\n")
+	}
+	b.WriteString("Если проблема повторится — напишите, посмотрим глубже.")
+	return b.String()
+}
+
 // journalText — последний хвост журнала гостя для раздела «журнал гостя».
 func (a *sessionArchive) journalText() string {
 	return a.GuestJournal

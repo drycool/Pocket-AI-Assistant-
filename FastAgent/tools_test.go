@@ -223,6 +223,8 @@ func TestClassifyToolLevels(t *testing.T) {
 	}{
 		{"read_file", 0, VForbidden},
 		{"read_file", 1, VReadOnly},
+		{"quick_probe", 1, VReadOnly},
+		{"quick_probe", 0, VForbidden},
 		{"grep_search", 1, VReadOnly},
 		{"write_file", 0, VForbidden},
 		{"write_file", 1, VNotAllowed},
@@ -242,12 +244,12 @@ func TestToolDefsFilteredByLevel(t *testing.T) {
 		t.Fatalf("на L0 инструментов быть не должно: %d", len(defs))
 	}
 	l1 := toolDefsForLevel(1)
-	if len(l1) != 3 {
-		t.Fatalf("на L1 ожидались 3 read-инструмента, получено %d", len(l1))
+	if len(l1) != 4 {
+		t.Fatalf("на L1 ожидались 4 read-инструмента, получено %d", len(l1))
 	}
 	l2 := toolDefsForLevel(2)
-	if len(l2) != 4 {
-		t.Fatalf("на L2 ожидались 4 инструмента, получено %d", len(l2))
+	if len(l2) != 5 {
+		t.Fatalf("на L2 ожидались 5 инструментов, получено %d", len(l2))
 	}
 }
 

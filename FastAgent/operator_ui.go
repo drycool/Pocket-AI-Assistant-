@@ -541,8 +541,11 @@ func opScenarios(st *opState) {
 			fmt.Printf("\n  %s\n", section)
 		}
 		mark := ""
+		if e.Learned {
+			mark = "  [из практики]"
+		}
 		if st.sc != nil && e.Title == st.sc.Title {
-			mark = "  ← сейчас"
+			mark += "  ← сейчас"
 		}
 		fmt.Printf("  %2d  %s (%s)%s\n", i+1, e.Title, e.Name, mark)
 	}
@@ -570,6 +573,23 @@ func opScenarios(st *opState) {
 	st.fixesDone = nil
 	fmt.Printf("[OK] сценарий: %s / %s (проверок %d, починок %d)\n",
 		sc.SectionTitle, sc.Title, len(sc.Checks), len(sc.Fixes))
+	if k := sc.Knowledge; k != nil {
+		// Паспорт случая: где и когда это уже было и чем кончилось. Именно это
+		// превращает регламент в узнавание рецидива, а не в «ещё раз проверить».
+		where := firstNonEmpty(k.Host, "машина не указана")
+		when := firstNonEmpty(k.Date, "дата не указана")
+		fmt.Printf("     случай: %s, %s — %s\n", where, when, k.Symptom)
+		if k.RootCause != "" {
+			fmt.Printf("     причина: %s\n", k.RootCause)
+		}
+		if k.Fix != "" {
+			v := ""
+			if k.Verified {
+				v = " (проверено)"
+			}
+			fmt.Printf("     помогло: %s%s\n", k.Fix, v)
+		}
+	}
 }
 
 func (st *opState) fixDone(id string) bool {
@@ -600,6 +620,23 @@ func opReport(st *opState) {
 	fmt.Println("\nЧто сказать клиенту:")
 	for _, line := range strings.Split(opClientText(st), "\n") {
 		fmt.Println("  " + line)
+	}
+
+	// Отчёт в окно КЛИЕНТА — по явному ответу оператора, а не автоматически:
+	// это единственное действие, которое клиент увидит на своём экране.
+	// Без подтверждения мы бы «говорили за оператора».
+	fmt.Println("\nПоказать этот отчёт в окне клиента?")
+	if opConfirm(st.reader, "  (y/n): ") {
+		raw, _ := json.Marshal(map[string]any{"text": opClientText(st)})
+		res, ok := remoteSubmit(st.reader, st.base, st.secret, st.code, st.key, "report", raw, st.events)
+		if !ok {
+			fmt.Println("[!] Отчёт не дошёл до клиента: окно не отвечает.")
+			return
+		}
+		remotePrintResult(res)
+		st.arch.Add("report", "report", res)
+	} else {
+		fmt.Println("[i] Отчёт остался у оператора; в окно клиента ничего не отправлено.")
 	}
 }
 

@@ -129,6 +129,15 @@ var toolRegistry = []ToolSpec{
 			`"required":["pattern"]}`,
 	},
 	{
+		Name: "quick_probe",
+		Description: "Быстрый снимок этого ПК за один заход (~10 с, только чтение): " +
+			"ОС, память, свободное место, IP и DNS, слушающие порты, установленные соединения, " +
+			"ошибки System/Application за сутки, защита, ожидание перезагрузки. " +
+			"Формат key=value. Начинайте диагностику с него, а diag — когда нужно глубже.",
+		Level:  L1Read,
+		Schema: `{"type":"object","properties":{}}`,
+	},
+	{
 		Name: "write_file",
 		Description: "Записать текстовый файл (создать или заменить). Требует подтверждения оператора. " +
 			"Системные каталоги и секреты запрещены.",
@@ -187,7 +196,7 @@ func toolSummary(level int) string {
 // фиксирован. write_file — изменение (VNeedsYes), MCP — чужое (только L3).
 func classifyTool(name string, level int) Verdict {
 	switch name {
-	case "read_file", "grep_search", "file_glob_search":
+	case "read_file", "grep_search", "file_glob_search", "quick_probe":
 		if level >= L1Read {
 			return VReadOnly
 		}
@@ -342,6 +351,8 @@ func execTool(name string, args map[string]any) (string, error) {
 		return toolGrepSearch(args)
 	case "file_glob_search":
 		return toolFileGlobSearch(args)
+	case "quick_probe":
+		return toolQuickProbe(args)
 	case "write_file":
 		return toolWriteFile(args)
 	}

@@ -25,6 +25,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 )
 
 // scenario — один регламент. Имя файла — <name>.json в каталоге scenarios/;
@@ -37,6 +38,23 @@ type scenario struct {
 	Checks       []scenarioCheck    `json:"checks"`
 	Fixes        []scenarioFix      `json:"fixes"`
 	Practice     []scenarioPractice `json:"practice,omitempty"`
+	// Knowledge — паспорт прожитого случая. Он ставится ПОСЛЕ работы, когда
+	// причина найдена и починка проверена; у предполётного чек-листа его нет.
+	Knowledge *scenarioKnowledge `json:"knowledge,omitempty"`
+}
+
+// scenarioKnowledge — по чему сценарий узнаётся при рецидиве: машина, дата,
+// симптом. Это не «красивое описание», а ключ поиска: если через месяц та же
+// станция снова не видит сервер, оператор должен увидеть, что этот случай уже
+// был, и что именно тогда помогло.
+type scenarioKnowledge struct {
+	Host      string `json:"host,omitempty"` // имя компьютера
+	Date      string `json:"date,omitempty"` // 2026-11-19
+	Symptom   string `json:"symptom"`        // словами клиента
+	RootCause string `json:"root_cause,omitempty"`
+	Fix       string `json:"fix,omitempty"`
+	Verified  bool   `json:"verified,omitempty"` // починка проверена на месте
+	Session   string `json:"session,omitempty"`  // архив сессии remote-<код>-<дата>
 }
 
 // scenarioCheck — одна проверка. Команды выполняются на госте по политике
@@ -175,6 +193,21 @@ func loadScenario(name string) (*scenario, error) {
 			}
 		}
 	}
+	if k := sc.Knowledge; k != nil {
+		// Паспорт без симптома бесполезен: по нему случай и узнаётся.
+		if strings.TrimSpace(k.Symptom) == "" {
+			return nil, fmt.Errorf("сценарий %s: в knowledge не задан symptom", path)
+		}
+		if d := strings.TrimSpace(k.Date); d != "" {
+			if _, err := time.Parse("2006-01-02", d); err != nil {
+				return nil, fmt.Errorf("сценарий %s: knowledge.date = %q, нужен формат 2006-01-02", path, d)
+			}
+		}
+		// «Проверено» без причины и починки — это обещание, а не опыт.
+		if k.Verified && (strings.TrimSpace(k.RootCause) == "" || strings.TrimSpace(k.Fix) == "") {
+			return nil, fmt.Errorf("сценарий %s: knowledge.verified требует root_cause и fix", path)
+		}
+	}
 	for i := range sc.Practice {
 		p := &sc.Practice[i]
 		if strings.TrimSpace(p.Title) == "" || strings.TrimSpace(p.Text) == "" {
@@ -195,6 +228,7 @@ type scenarioEntry struct {
 	Title        string
 	Section      string
 	SectionTitle string
+	Learned      bool // у кейса есть паспорт: это прожитый случай, а не чек-лист
 }
 
 // scenarioCatalog — все сценарии рядом с бинарём, включая подкаталоги-разделы
@@ -223,6 +257,7 @@ func scenarioCatalog() []scenarioEntry {
 			Title:        sc.Title,
 			Section:      sc.Section,
 			SectionTitle: sc.SectionTitle,
+			Learned:      sc.Knowledge != nil,
 		})
 		return nil
 	})
@@ -352,4 +387,58 @@ func (sc *scenario) checkByID(id string) (scenarioCheck, bool) {
 		}
 	}
 	return scenarioCheck{}, false
+}
+
+// scenarioContext — проверенные действия для системного промпта агента.
+//
+// Зачем не «просто рассказать про кейс». На выезде агент работает на чужой
+// машине: памяти Jev там нет, и всё, что он знает о классе проблемы, — это
+// команды, которые уже дали ответ в прошлых сессиях. Кейс и есть такой набор
+// (проверки/починки/практика), но в промпт его надо положить коротко и
+// буквально: команда → что она проверяет. Модель, которой дали список
+// сработавших команд, не изобретает свою версию `ipconfig`.
+func scenarioContext() string {
+	sc := chatScenario
+	if sc == nil {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "\n\nПРОВЕРЕННЫЕ ДЕЙСТВИЯ: загружен кейс «%s» (%s). "+
+		"Опирайся на эти команды; если они не подходят — объясни почему, а не заменяй молча.",
+		sc.Title, sc.SectionTitle)
+	for i, c := range sc.Checks {
+		if i >= 15 {
+			fmt.Fprintf(&b, "\n- …ещё %d проверок в кейсе", len(sc.Checks)-15)
+			break
+		}
+		fmt.Fprintf(&b, "\n- проверка «%s»: %s", c.Title, truncate(strings.Join(c.Commands, " | "), 240))
+		if c.Hint != "" {
+			fmt.Fprintf(&b, " (подсказка: %s)", truncate(c.Hint, 160))
+		}
+	}
+	for i, f := range sc.Fixes {
+		if i >= 10 {
+			break
+		}
+		fmt.Fprintf(&b, "\n- починка «%s»: %s", f.Title, truncate(strings.Join(f.Commands, " | "), 240))
+		if len(f.Recheck) > 0 {
+			fmt.Fprintf(&b, " (перепроверить: %s)", strings.Join(f.Recheck, ", "))
+		}
+	}
+	if k := sc.Knowledge; k != nil {
+		b.WriteString("\n- этот случай уже был: ")
+		fmt.Fprintf(&b, "%s, %s — «%s»", firstNonEmpty(k.Host, "машина не указана"),
+			firstNonEmpty(k.Date, "дата не указана"), k.Symptom)
+		if k.RootCause != "" {
+			fmt.Fprintf(&b, "; причина: %s", k.RootCause)
+		}
+		if k.Fix != "" {
+			v := ""
+			if k.Verified {
+				v = " (проверено)"
+			}
+			fmt.Fprintf(&b, "; помогло: %s%s", k.Fix, v)
+		}
+	}
+	return b.String()
 }

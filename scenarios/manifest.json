@@ -1,7 +1,7 @@
 {
   "guest_exe": {
     "name": "fastagent.exe",
-    "size": 6796288,
-    "sha256": "59b778b8833b71b709586632d7313138ace07de3745bbb8ddc27677626d9c946"
+    "size": 6823424,
+    "sha256": "73526f153f1aa06ef565dbea2d473db5dc8292ce824554ef81df92a8476c3ec2"
   }
 }

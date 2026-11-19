@@ -20,7 +20,8 @@
 #   * каждая команда по-прежнему идёт через подпись и через политику гостя —
 #     этот скрипт политику не ослабляет и подтверждений не подставляет;
 #   * по умолчанию разрешены только чтение и снимок (read/grep/glob/diag/
-#     journal/save), а run/put (изменения) отклоняются на стороне скрипта;
+#     quick/report/journal/save), а run/put (изменения) отклоняются на стороне
+#     скрипта; report — текст в окно клиента, тоже не изменение;
 #   * панель вывода дублируется в файл, поэтому ни один ответ не теряется и
 #     протокол можно проверить построчно.
 set -euo pipefail
@@ -119,13 +120,13 @@ cmd_send() {
   local verb
   verb="$(printf '%s' "$line" | awk '{print tolower($1)}')"
   case "$verb" in
-    read|cat|grep|grep_search|glob|file_glob_search|diag|journal|log|save|help|\?)
+    read|cat|grep|grep_search|glob|file_glob_search|diag|quick|probe|report|say|journal|log|save|help|\?)
       ;;
     run|cmd|exec|put|upload|fix)
       [[ "${FA_DIAG_ALLOW_CHANGE:-0}" == "1" ]] \
         || die "«$verb» — это изменение; в режиме головы разрешено только чтение. Если действительно нужно: FA_DIAG_ALLOW_CHANGE=1 (и подтверждение всё равно спросит консоль)"
       ;;
-    *) die "команда «$verb» не из разрешённых: read/grep/glob/diag/journal/save" ;;
+    *) die "команда «$verb» не из разрешённых: read/grep/glob/diag/quick/report/journal/save" ;;
   esac
 
   local off step before

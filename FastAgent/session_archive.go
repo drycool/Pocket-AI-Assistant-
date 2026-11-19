@@ -146,10 +146,17 @@ func (a *sessionArchive) counts() (steps, refused, got, sent int) {
 }
 
 func (a *sessionArchive) duration() time.Duration {
-	if len(a.Entries) == 0 {
-		return time.Since(a.Started)
+	// Служебные записи (Note: «/save», «/report») в длительность не входят:
+	// их отметка ставится уже при записи архива, и из-за неё txt-архив и уроки
+	// называли разное время одной и той же сессии (полевой прогон bd3ffb:
+	// 2m4s в архиве против 3m5s в заметке). Длительность — до последнего
+	// реального шага.
+	for i := len(a.Entries) - 1; i >= 0; i-- {
+		if a.Entries[i].Res != nil {
+			return a.Entries[i].At.Sub(a.Started)
+		}
 	}
-	return a.Entries[len(a.Entries)-1].At.Sub(a.Started)
+	return time.Since(a.Started)
 }
 
 // Text — полный архив сессии для человека.

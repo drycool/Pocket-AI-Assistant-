@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // withLogsDir — logsDir на время теста: журнал гостя и txt-архив пишутся туда.
@@ -111,6 +112,35 @@ func TestArchiveTextTruncatesLongOutput(t *testing.T) {
 	if !strings.HasSuffix(prefix, "я") {
 		t.Fatalf("обрезка разрезала UTF-8 руну: %q", prefix[len(prefix)-8:])
 	}
+}
+
+func TestArchiveDurationIgnoresSaveNote(t *testing.T) {
+	arch := newSessionArchive("dur", "http://b")
+	arch.Started = time.Now().Add(-2 * time.Minute)
+	arch.Entries = []archiveEntry{
+		{At: arch.Started.Add(30 * time.Second), Line: "diag", Res: &remoteResult{OK: true}},
+		{At: arch.Started.Add(10 * time.Minute), Line: "/save", Note: "архив записан"},
+	}
+	// Служебная запись /save не должна растягивать сессию: txt-архив пишется до
+	// неё, уроки — после, и раньше они называли разное время одной сессии
+	// (полевой прогон bd3ffb: 2m4s и 3m5s).
+	if got := arch.duration().Round(time.Second); got != 30*time.Second {
+		t.Fatalf("длительность с учётом /save: %s, ожидалось 30s", got)
+	}
+	if txt, md := arch.Text(), arch.Lessons(""); !strings.Contains(txt, "Длительность: 30s") || !strings.Contains(md, "длительность 30s") {
+		t.Fatalf("txt и заметка называют разное время:\ntxt=%q\nmd=%q",
+			grepLine(txt, "Длительность"), grepLine(md, "длительность"))
+	}
+}
+
+// grepLine — строка с подстрокой (для сообщений об ошибке).
+func grepLine(s, sub string) string {
+	for _, l := range strings.Split(s, "\n") {
+		if strings.Contains(l, sub) {
+			return l
+		}
+	}
+	return "<нет>"
 }
 
 func TestTailLines(t *testing.T) {

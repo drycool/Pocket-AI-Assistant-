@@ -2,7 +2,7 @@
 chcp 65001
 title Pocket AI Assistant - Control Center
 
-setlocal
+setlocal enabledelayedexpansion
 set "USB_DRIVE=%~dp0"
 set "AGENT_BAT=%USB_DRIVE%bin\agent.bat"
 set "FF_BAT=%USB_DRIVE%bin\ff-portable.bat"
@@ -22,7 +22,7 @@ echo  [2] Запустить Firefox Portable (Gemini Web UI)
 echo  [3] Открыть папку с Отчетами (Data/reports)
 echo  [4] Открыть папку с Логами (Data/logs)
 echo  [5] Проверить связь с Ollama gpu2 (Локальная модель)
-echo  [6] FastAgent - быстрый агент (DeepSeek/облако, уровни доступа L0-L3)
+echo  [6] Чат с агентом (обычный или по кейсу - проверенные действия)
 echo  [7] Полевой тест FastAgent (L0/L1/L2, отчет для отправки)
 echo  [0] Выход
 echo ===================================================
@@ -57,21 +57,81 @@ goto MENU
 :RUN_FAST
 cls
 echo ---------------------------------------------------
-echo [*] FastAgent: облачная модель + уровни доступа
-echo     L0 чат ^| L1 чтение ^| L2 починки ^| L3 полный доступ
-echo     Уровень по умолчанию задан в Data\config.fast.json
+echo [*] FastAgent: разговор с агентом (DeepSeek первым)
+echo     Уровень доступа - Data\config.fast.json (обычно L1: чтение).
+echo     Запись появляется со L2 и всегда спрашивает подтверждение;
+echo     повышение - командой /level N внутри чата.
 echo ---------------------------------------------------
-if exist "%FAST_BAT%" goto FAST_RUN
-echo [ERROR] Не найден %FAST_BAT%
-pause
-goto MENU
-:FAST_RUN
+echo  [1] Обычный чат
+echo  [2] Чат по кейсу - проверенные действия из scenarios\
+echo  [0] Назад
+echo ---------------------------------------------------
+set "FMODE="
+set /p FMODE="Выберите действие (0-2): "
+if "%FMODE%"=="1" goto FAST_CHAT
+if "%FMODE%"=="2" goto FAST_SCEN
+if "%FMODE%"=="0" goto MENU
+goto RUN_FAST
+
+:FAST_CHAT
 call "%FAST_BAT%"
+goto FAST_DONE
+
+:FAST_SCEN
+call :PICK_SCENARIO
+if not defined CHOSEN goto RUN_FAST
+echo.
+echo [*] Кейс: %CHOSEN%
+call "%FAST_BAT%" "" "%CHOSEN%"
+goto FAST_DONE
+
+:FAST_DONE
 echo.
 echo ---------------------------------------------------
 echo [OK] Работа FastAgent завершена.
 pause
 goto MENU
+
+:PICK_SCENARIO
+set "CHOSEN="
+set "SCEN_ROOT=%USB_DRIVE%scenarios"
+if not exist "%SCEN_ROOT%\" (
+    echo [ERROR] Не найден каталог %SCEN_ROOT%
+    pause
+    goto :eof
+)
+cls
+echo ---------------------------------------------------
+echo [*] Кейсы: проверенные действия и паспорт случая
+echo     (файлы *.json в scenarios\, разделы - подкаталоги)
+echo ---------------------------------------------------
+set /a SN=0
+for /r "%SCEN_ROOT%" %%F in (*.json) do (
+    set "FULL=%%F"
+    set "REL=!FULL:*\scenarios\=!"
+    if /i not "!REL!"=="manifest.json" (
+        set "NAME=!REL:.json=!"
+        set /a SN+=1
+        set "SN_!SN!=!NAME!"
+        echo    [!SN!] !NAME!
+    )
+)
+if %SN%==0 (
+    echo     Кейсов нет: положите *.json в scenarios\ ^(см. scenarios\README.md^)
+    pause
+    goto :eof
+)
+echo ---------------------------------------------------
+set "PICK="
+set /p PICK="Номер кейса (Enter - назад): "
+if not defined PICK goto :eof
+set "CHOSEN=!SN_%PICK%!"
+if not defined CHOSEN (
+    echo     Нет такого номера.
+    pause
+    goto :eof
+)
+goto :eof
 
 :RUN_AGENT
 cls

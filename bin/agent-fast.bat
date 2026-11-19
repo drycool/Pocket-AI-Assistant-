@@ -4,8 +4,15 @@ setlocal
 
 rem ============================================================
 rem  FastAgent — быстрый агент (DeepSeek-first, уровни доступа L0..L3)
-rem  Уровень можно задать аргументом:  agent-fast.bat 1
-rem  (0 = чат, 1 = чтение, 2 = безопасные починки, 3 = полный доступ)
+rem
+rem    agent-fast.bat                      уровень из Data\config.fast.json
+rem    agent-fast.bat 1                    принудительно L1 (только чтение)
+rem    agent-fast.bat "" medoc/server-zillya
+rem                                        чат по кейсу: проверенные действия
+rem                                        и паспорт случая в системном промпте
+rem
+rem  Уровни: 0 = чат, 1 = чтение, 2 = безопасные починки (запись с
+rem  подтверждением), 3 = полный доступ.
 rem ============================================================
 
 set "USB_DRIVE=%~dp0..\"
@@ -21,22 +28,23 @@ if not exist "%EXE%" (
 )
 set "CFG=%USB_DRIVE%Data\config.fast.json"
 set "LEVEL=%~1"
+set "SCEN=%~2"
 
 if not exist "%CFG%" (
     echo [WARN] Нет %CFG%
     echo        Скопируйте Data\config.fast.example.json в Data\config.fast.json и вставьте ключ DeepSeek.
 )
 
-if not exist "%EXE%" (
-    echo [ERROR] Не найден %EXE%
-    echo         Сборка: cd FastAgent ^&^& GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o fastagent.exe main.go
-    pause
-    exit /b 1
-)
+set "FA_ARGS="
+if not "%LEVEL%"=="" set "FA_ARGS=%FA_ARGS% -level %LEVEL%"
+if not "%SCEN%"==""  set "FA_ARGS=%FA_ARGS% -scenario "%SCEN%""
 
-if "%LEVEL%"=="" (
-    "%EXE%"
+if "%SCEN%"=="" (
+    echo [*] Чат с агентом. Проверенные действия кейса: /scenario ^<имя^>
 ) else (
-    "%EXE%" -level %LEVEL%
+    echo [*] Чат по кейсу %SCEN% - в системном промпте проверенные действия и паспорт случая.
 )
+echo.
+
+"%EXE%"%FA_ARGS%
 exit /b %ERRORLEVEL%

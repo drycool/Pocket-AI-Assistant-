@@ -31,7 +31,7 @@ K="$ROOT/FieldKit"
 rsync -a --delete "$K/scenarios/" "$M/scenarios/"
 rsync -a --delete "$K/tests/" "$M/tests/"
 rsync -a "$K"/fastagent.exe "$K"/fastagent-linux-* "$K"/config.fast.example.json \
-         "$K"/*.md "$K"/RUN-*.txt "$K"/README-FIRST.txt "$K"/SHA256SUMS.txt "$M/"
+         "$K"/*.md "$K"/RUN-*.txt "$K"/README-FIRST.txt "$K"/START.bat "$K"/SHA256SUMS.txt "$M/"
 rsync -a "$K/scripts/field-test-fastagent.bat" "$M/scripts/"
 
 # --- запасной путь: bin/agent-fast.bat и копия FastAgent/ ---

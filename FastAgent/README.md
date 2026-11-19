@@ -50,12 +50,14 @@ L2-blk, L2-sfc + обе детерминированные самопровер�
 
 ```bat
 :: с флешки (Windows)
-bin\agent-fast.bat          :: уровень из Data\config.fast.json
-bin\agent-fast.bat 1        :: принудительно L1 (чтение)
-bin\agent-fast.bat 3        :: полный доступ (опасные — двойное подтверждение)
+bin\agent-fast.bat                        :: уровень из Data\config.fast.json, обычный чат
+bin\agent-fast.bat 1                      :: принудительно L1 (чтение)
+bin\agent-fast.bat 3                      :: полный доступ (опасные — двойное подтверждение)
+bin\agent-fast.bat "" medoc/server-zillya :: чат по кейсу: проверенные действия в промпте
 ```
 
-Из `START.bat` — пункт **[6]**.
+Из `START.bat` — пункт **[6]**: обычный чат или чат по кейсу (список собирается по
+`scenarios/**/*.json`, без пересборки). Уже в чате `/scenario <кейс>` делает то же самое.
 
 Внутренние команды агента: `/level N`, `/level`, `/diag`, `/report`, `/rag`, `/fb`, `/follow on|off`, `/clear`, `exit`.
 

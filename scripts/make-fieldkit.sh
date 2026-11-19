@@ -42,7 +42,8 @@ cp -f "$FA/README.md"                      "$KIT/FastAgent-README.md"
 cp -f "$FA/FIELD-TEST.md"                  "$KIT/FIELD-TEST.md"
 cp -f "$ROOT/RUN-FIELD-TEST.txt"           "$KIT/RUN-FIELD-TEST.txt"
 cp -f "$ROOT/RUN-REMOTE-TEST.txt"          "$KIT/RUN-REMOTE-TEST.txt"
-echo "[+] README.md, FastAgent-README.md, FIELD-TEST.md, RUN-FIELD-TEST.txt, RUN-REMOTE-TEST.txt"
+cp -f "$ROOT/START.bat"                    "$KIT/START.bat"
+echo "[+] README.md, FastAgent-README.md, FIELD-TEST.md, RUN-FIELD-TEST.txt, RUN-REMOTE-TEST.txt, START.bat"
 
 # --- сценарии оператора (R5): корень + разделы (medoc/, network/, …) ---
 mkdir -p "$KIT/scenarios"
@@ -68,8 +69,9 @@ cat > "$KIT/README-FIRST.txt" <<EOF
 1. Вставить флешку admin-stick в гостевой Windows-ПК.
    SmartScreen: «Подробнее → Выполнить в любом случае».
 2. Запустить из КОРНЯ флешки (не из FieldKit):
-   START.bat (правый клик → «Запуск от имени администратора») → пункт [7].
-   Это прогонит 8 сессий, обе самопроверки и -ask, соберёт один отчёт.
+   START.bat (правый клик → «Запуск от имени администратора»).
+   [6] — чат с агентом: обычный или по кейсу (проверенные действия из scenarios\);
+   [7] — полевой тест: 8 сессий, обе самопроверки и -ask, один отчёт.
 3. Отдать сводный отчёт:
    Data\logs\field-test-<штамп>.txt  (главный файл)
    Data\logs\field-L*-*.txt, field-ask-*.txt, field-policy-*.txt, field-selftest-*.txt
@@ -102,6 +104,7 @@ fastagent.exe                 windows/amd64 — главный бинарник
 fastagent-linux-arm64         отладка на Pi5 (aarch64), не обязателен на Windows
 fastagent-linux-amd64         оффлайн-путь: загрузочная Ubuntu на x86_64 (REMOTE-DIAG §8)
 config.fast.example.json      образец: скопировать в Data\config.fast.json + ключ
+START.bat                     меню флешки: [6] чат/кейс, [7] полевой тест
 tests/                        входные файлы 8 полевых сессий
 scripts/field-test-fastagent.bat  прогонщик (из корня флешки — START.bat [7])
 SHA256SUMS.txt                контрольные суммы (проверка: sha256sum -c)
@@ -112,7 +115,7 @@ echo "[+] README-FIRST.txt"
 (
   cd "$KIT"
   sha256sum fastagent.exe config.fast.example.json README.md FastAgent-README.md \
-            FIELD-TEST.md RUN-FIELD-TEST.txt RUN-REMOTE-TEST.txt README-FIRST.txt tests/*.txt \
+            FIELD-TEST.md RUN-FIELD-TEST.txt RUN-REMOTE-TEST.txt README-FIRST.txt START.bat tests/*.txt \
             scripts/field-test-fastagent.bat > SHA256SUMS.txt 2>/dev/null || true
   find scenarios -name '*.json' | sort | xargs sha256sum >> SHA256SUMS.txt
   [[ -f scenarios/README.md ]] && sha256sum scenarios/README.md >> SHA256SUMS.txt

@@ -343,16 +343,42 @@ func TestScenarioMarkerRulesCatchLenovoOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res := find(srv, "medoc_service").evaluate("MEDOC-SVC: MEDocServer status=Stopped start=Automatic\n", true, false); res.OK {
-		t.Error("остановленная служба МЕДОК признана работающей")
+	// Полевой прогон bd3ffb: МЕДОК держал порт 9996 процессом, службы не было —
+	// проверка «Служба работает» дала ложный отказ. Теперь критерий — процесс.
+	if res := find(srv, "medoc_running").evaluate("", true, false); res.OK {
+		t.Error("пустой список процессов признан работающим МЕДОК")
 	}
-	if res := find(srv, "medoc_service").evaluate("MEDOC-SVC: MEDocServer status=Running start=Automatic\n", true, false); !res.OK {
-		t.Errorf("работающая служба МЕДОК не распознана: %q", res.Message)
+	if res := find(srv, "medoc_running").evaluate("MEDOC-RUN: MedocSRV id=1084 path=C:\\Program Files\\Medoc\\MedocSRV.exe\n", true, false); !res.OK {
+		t.Errorf("запущенный процесс МЕДОК не распознан: %q", res.Message)
+	}
+	// Служба — справочная проверка: её пустота не должна давать отказ.
+	if res := find(srv, "medoc_service").evaluate("", true, false); !res.OK {
+		t.Errorf("справочная проверка службы дала отказ при пустом выводе: %q", res.Message)
+	}
+	// Соединения: Listen есть — проверка пройдена; вывода нет — проблема.
+	if res := find(srv, "connections_9996").evaluate("", true, false); res.OK {
+		t.Error("отсутствие состояния порта 9996 признано нормой")
+	}
+	conn := "TCP: Listen local=0.0.0.0:9996 remote=0.0.0.0:0 pid=1084\n" +
+		"TCP: Established local=192.168.0.150:9996 remote=192.168.0.70:50177 pid=1084\n"
+	if res := find(srv, "connections_9996").evaluate(conn, true, false); !res.OK {
+		t.Errorf("слушающий порт 9996 не распознан: %q", res.Message)
+	}
+	// Справочные проверки путей не должны давать отказ из-за exit=1
+	// (Get-ChildItem по отсутствующему каталогу): полевой прогон bd3ffb.
+	for _, id := range []string{"medoc_paths", "zillya_paths"} {
+		c := find(srv, id)
+		if !c.IgnoreExit {
+			t.Errorf("%s: ignore_exit не выставлен — exit=1 по пустому каталогу даст ложный отказ", id)
+		}
+		if res := c.evaluate("MEDOC-PATH: MedocSRV 16.11.2026 15:22:44\n", false, false); !res.OK {
+			t.Errorf("%s: вывод есть, а проверка отказала: %q", id, res.Message)
+		}
 	}
 	if res := find(srv, "fw_rules").evaluate("FW: Правило МЕДОК action=Block dir=Outbound enabled=True\n", true, false); res.OK {
 		t.Error("блокирующее правило брандмауэра не замечено")
 	}
-	if res := find(srv, "app_errors").evaluate("APPERR: 11-19 08:35 id=10013 Zillya\n", true, false); res.OK {
+	if res := find(srv, "app_errors").evaluate("APPERR: 11-19 08:35 id=10013 Zillya app=\n", true, false); res.OK {
 		t.Error("ошибка МЕДОК/фильтра в журнале не замечена")
 	}
 }

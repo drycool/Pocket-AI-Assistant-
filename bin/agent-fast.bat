@@ -9,7 +9,16 @@ rem  (0 = чат, 1 = чтение, 2 = безопасные починки, 3 =
 rem ============================================================
 
 set "USB_DRIVE=%~dp0..\"
-set "EXE=%USB_DRIVE%FastAgent\fastagent.exe"
+rem Два раскладки флешки: FieldKit в корне (fastagent.exe рядом со scenarios\)
+rem или репозиторий (FastAgent\fastagent.exe). Берём тот, что есть: сценарии
+rem ищутся рядом с самим exe, поэтому рабочий каталог менять не нужно.
+set "EXE=%USB_DRIVE%fastagent.exe"
+if not exist "%EXE%" set "EXE=%USB_DRIVE%FastAgent\fastagent.exe"
+if not exist "%EXE%" (
+    echo [ERROR] Не найден fastagent.exe ни в корне флешки, ни в FastAgent\
+    pause
+    exit /b 1
+)
 set "CFG=%USB_DRIVE%Data\config.fast.json"
 set "LEVEL=%~1"
 

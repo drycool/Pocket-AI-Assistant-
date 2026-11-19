@@ -121,7 +121,7 @@ func TestPrintGuestReportFramesText(t *testing.T) {
 	}
 	got := string(data)
 	for _, want := range []string{"ОТЧЁТ О РАБОТЕ", "Компьютер: PC1", "Итог: проверено",
-		"окно можно закрыть"} {
+		"Окно не закрывайте"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("в консоли клиента нет %q:\n%s", want, got)
 		}

@@ -160,7 +160,7 @@ func printGuestReport(text string) {
 		fmt.Println("  " + line)
 	}
 	fmt.Println(strings.Repeat("=", width))
-	fmt.Println("  Это окно можно закрыть — проверка закончена.")
+	fmt.Println("  Это сообщение от оператора. Окно не закрывайте, пока он не закончит.")
 	fmt.Println()
 }
 

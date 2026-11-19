@@ -11,7 +11,7 @@ rem ============================================================
 set "USB_DRIVE=%~dp0..\"
 rem Два раскладки флешки: FieldKit в корне (fastagent.exe рядом со scenarios\)
 rem или репозиторий (FastAgent\fastagent.exe). Берём тот, что есть: сценарии
-rem ищутся рядом с самим exe, поэтому рабочий каталог менять не нужно.
+rem ищутся в scenarios\ корня комплекта (два уровня выше exe), каталог не важен.
 set "EXE=%USB_DRIVE%fastagent.exe"
 if not exist "%EXE%" set "EXE=%USB_DRIVE%FastAgent\fastagent.exe"
 if not exist "%EXE%" (

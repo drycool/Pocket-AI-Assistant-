@@ -2,6 +2,9 @@
 Data/config.json
 Data/config.public.json
 Data/config.fast.json
+Data/remote-secret.txt
+Data/remote-broker.pid
+Data/logs/broker.log
 
 # FastAgent: сессии, снимки и журнал действий
 Data/sessions-fast/*.json

@@ -1042,9 +1042,21 @@ func runCommand(cmd string, timeout time.Duration) (string, int, error) {
 // команды» и «покажи текст», поэтому без метки не исполняется ничего.
 var reCmdBlock = regexp.MustCompile("(?ms)```(?:cmd|bat|powershell|pwsh|ps1|bash|sh|shell|console)[ \\t]*\\n(.*?)```")
 
+// reManualBlock — блок «человеку, не агенту». Полевой прогон 19.11.2026 (GIGA, L1)
+// показал, зачем он нужен: модель давала `bcdboot C:\Windows /f UEFI` как команду
+// «оператору вручную, от администратора», оболочка исполняла блок, получала отказ
+// и возвращала его модели новой репликой — 33 отказа на команды, которые сам агент
+// выполнять не собирался. Метка `cmd-manual` (и синонимы) означает: показать,
+// но НЕ исполнять.
+// Открывающая и закрывающая метки — по правилам Markdown, с начала строки:
+// иначе «```cmd-manual», упомянутый в тексте, съел бы следующий блок.
+var reManualBlock = regexp.MustCompile("(?ms)^[ \\t]*```(?:cmd-manual|manual|for-operator|human)[ \\t]*\\n.*?^[ \\t]*```[ \\t]*$")
+
 // extractCommands достаёт команды из блоков кода вида ```cmd ... ```.
 // Блок без метки языка — цитата, а не задание: см. комментарий у reCmdBlock.
+// Блок с меткой `cmd-manual` — инструкция человеку: вырезается до разбора.
 func extractCommands(answer string) []string {
+	answer = reManualBlock.ReplaceAllString(answer, "")
 	var cmds []string
 	for _, m := range reCmdBlock.FindAllStringSubmatch(answer, -1) {
 		for _, line := range strings.Split(m[1], "\n") {
@@ -1297,6 +1309,10 @@ func main() {
 		history = append(history, Message{Role: "user", Content: diagnosticsPrompt()})
 	}
 
+	// Память тормоза живёт в пределах сессии: смена уровня и /clear её сбрасывают
+	// (после /level 3 та же команда уже законна — блокировать её нельзя).
+	guard := newCommandGuard()
+
 	for {
 		fmt.Print("\nВы > ")
 		line, err := reader.ReadString('\n')
@@ -1373,6 +1389,7 @@ func main() {
 			}
 			currentLevel = n
 			cfg.AccessLevel = n
+			guard.reset() // на новом уровне прежние отказы не приговор
 			fmt.Printf("[OK] Уровень доступа: %s\n", levelLabels[n])
 			continue
 
@@ -1387,6 +1404,7 @@ func main() {
 
 		case low == "/clear":
 			history = nil
+			guard.reset()
 			fmt.Println("[OK] Контекст очищен.")
 			continue
 
@@ -1505,25 +1523,41 @@ func main() {
 			provider.Name, ttft.Seconds(), len(answer), currentLevel, reasoningNote)
 
 		// Выполнение команд, предложенных моделью (в рамках уровня доступа).
+		// Тормоз: повтор уже отклонённой команды не выполняется, а серия отказов
+		// подряд останавливает авто-продолжение. Повод — прогон 19.11.2026 на GIGA:
+		// `bcdboot C:\Windows /f UEFI` предлагался 5 раз, каждый отказ возвращался
+		// модели новой репликой user, auto_followup запускал ещё один ответ, и за
+		// 14 минут набежало 124 реплики агента при 4–5 репликах человека.
 		cmds := extractCommands(answer)
+		guard.beginTurn()
+		stopped, ranAny := false, false
 		for _, cmd := range cmds {
+			if blocked, note := guard.check(cmd); blocked {
+				fmt.Printf("\n[BLOCK] повтор отклонённой команды не выполняется: %s\n", cmd)
+				history = append(history, Message{Role: "user",
+					Content: fmt.Sprintf("Команда `%s` НЕ выполнена: %s.", cmd, note)})
+				logAction(currentLevel, cmd, VNotAllowed, false, -1, "тормоз: "+note)
+				stopped = true
+				continue
+			}
 			res := handleCommand(reader, cfg, cmd)
 			if !res.handled {
 				// Модель обязана знать, что команда НЕ выполнена и почему: иначе
 				// она считает её успешной и/или предлагает тот же вариант снова.
 				history = append(history, Message{Role: "user",
 					Content: fmt.Sprintf("Команда `%s` НЕ выполнена: %s.", cmd, res.note)})
-				if cfg.AutoFollowup {
-					follow, _, _, _, ferr := streamAnswer(cfg, history, nil)
-					if ferr == nil {
-						history = append(history, Message{Role: "assistant", Content: follow})
-					} else {
-						fmt.Printf("\n[ERROR] продолжение не удалось: %v\n", ferr)
-						history = history[:len(history)-1]
-					}
+				// После отказа авто-продолжения нет: отказ — граница политики,
+				// а не новый факт о системе. Само решение остаётся за человеком.
+				if stop, streak := guard.refused(cmd, res.note); stop {
+					fmt.Printf("\n[STOP] политика отказала %d раз(а) подряд — цепочка остановлена.\n", streak)
+					fmt.Printf("       `%s` вне уровня L%d: нужен L3 или ручное выполнение.\n", cmd, currentLevel)
+					stopped = true
+					break
 				}
 				continue
 			}
+			guard.ran()
+			ranAny = true
 			// В историю уходит РЕАЛЬНЫЙ код возврата и длительность — раньше здесь
 			// был жёстко зашитый «код 0», из-за чего модель докладывала об успехе
 			// при коде 1 и пустом выводе (найдено в третьем полевом прогоне).
@@ -1540,15 +1574,22 @@ func main() {
 				report += fmt.Sprintf("\n(обрати внимание: код возврата %d — команда завершилась с ошибкой)", res.code)
 			}
 			history = append(history, Message{Role: "user", Content: report})
-			if cfg.AutoFollowup {
-				follow, _, _, _, ferr := streamAnswer(cfg, history, nil)
-				if ferr == nil {
-					history = append(history, Message{Role: "assistant", Content: follow})
-				} else {
-					fmt.Printf("\n[ERROR] продолжение не удалось: %v\n", ferr)
-					history = history[:len(history)-1]
-				}
+		}
+
+		// Один ответ на весь блок команд, а не ответ после каждой: три
+		// прочитанные команды давали три реплики модели без участия человека.
+		// После отказа и после остановки тормозом авто-продолжения нет вовсе.
+		if cfg.AutoFollowup && ranAny && !stopped {
+			follow, _, _, _, ferr := streamAnswer(cfg, history, nil)
+			if ferr == nil {
+				history = append(history, Message{Role: "assistant", Content: follow})
+			} else {
+				fmt.Printf("\n[ERROR] продолжение не удалось: %v\n", ferr)
+				history = history[:len(history)-1]
 			}
+		}
+		if stopped {
+			fmt.Println("[i] Дальше — за оператором: /level 3, либо выполнить команду вручную в своей консоли.")
 		}
 
 		saveSession(sessionFile, sessionID, history)
@@ -1639,7 +1680,18 @@ func systemPromptBase() string {
 		"Для сведений об ОС и железе бери команды, не зависящие от локали: " +
 		"`wmic os get Caption,Version,BuildNumber,OSArchitecture /value`, " +
 		"`Get-CimInstance Win32_OperatingSystem | Select-Object Caption,Version,BuildNumber,OSArchitecture | Format-List`, " +
-		"`ver`, `systeminfo` (без фильтра); для дисков — `wmic logicaldisk get DeviceID,Size,FreeSpace,VolumeName /value`."
+		"`ver`, `systeminfo` (без фильтра); для дисков — `wmic logicaldisk get DeviceID,Size,FreeSpace,VolumeName /value`. " +
+		// Правила диалога. Без них модель считает партнёром оператора, приписывает
+		// себе чужие запуски и повторяет отклонённое — ровно это случилось 19.11.2026
+		// на GIGA: «команда всё-таки выполнилась (видимо, политика пропустила)»
+		// при том, что в журнале не было ни одного запуска bcdedit.
+		"Как устроен диалог: блок ```cmd исполняет оболочка сразу после твоего ответа — не ты и не человек; " +
+		"результат приходит репликой «Вывод команды … (код N)», отказ политики — репликой «Команда … НЕ выполнена». " +
+		"Если такой реплики нет — команда НЕ выполнялась: не пиши «всё-таки выполнилась» и не приписывай запуск ни себе, ни оператору. " +
+		"Команду, которую должен выполнить человек сам (от администратора, в BIOS, вне политики), давай блоком ```cmd-manual — он только показывается, не исполняется. " +
+		"Отклонённую команду не предлагай снова: допускается одна вариация, затем остановись и скажи прямо, что нужен L3 или ручной запуск. " +
+		"Обращайся к человеку напрямую, а не в третьем лице («скажи оператору», «пусть оператор»). " +
+		"Запись предлагай, только назвав машину и том, которых она касается, и сверив с целью кейса: чинить чужой диск командами про C: хоста — ошибка."
 }
 
 func diagnosticsPrompt() string {

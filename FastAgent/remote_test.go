@@ -775,3 +775,52 @@ func TestRemoteFileTransferThroughBroker(t *testing.T) {
 		t.Fatal("файл записан после отказа оператора")
 	}
 }
+
+// Файл-билет должен быть Windows-программой: ELF под именем .exe клиент не
+// запустит («невозможно запустить это приложение на вашем ПК», 0xc0000033).
+// Дефект 19.11.2026: remote.sh передавал брокеру linux-бинарник оператора.
+func TestRemoteTicketFileSkipsNonPE(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", dir)
+
+	// Имя не «fastagent»: этот же каталог служит XDG-кэшем, а внутри него
+	// remoteTicketFile создаёт подкаталог fastagent/.
+	elf := filepath.Join(dir, "operator-bin")
+	if err := os.WriteFile(elf, []byte("\x7fELF\x02\x01\x01\x00 linux-arm64"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{}
+	cfg.Remote.TicketExe = elf
+	if _, err := remoteTicketFile(cfg, "abc123"); err == nil {
+		t.Fatal("ELF принят файлом-билетом: клиент получил бы «невозможно запустить»")
+	} else if !strings.Contains(err.Error(), "не PE") {
+		t.Fatalf("ошибка не объясняет причину: %v", err)
+	}
+}
+
+func TestRemoteTicketFileWritesPE(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", dir)
+
+	pe := filepath.Join(dir, "fastagent.exe")
+	body := []byte("MZ\x90\x00 fake-windows-body")
+	if err := os.WriteFile(pe, body, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{}
+	cfg.Remote.TicketExe = pe
+	dst, err := remoteTicketFile(cfg, "abc123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Base(dst) != "fastagent-abc123.exe" {
+		t.Fatalf("имя билета не по коду сессии: %s", dst)
+	}
+	got, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, body) {
+		t.Fatal("содержимое билета не совпало с exe")
+	}
+}

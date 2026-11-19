@@ -28,12 +28,26 @@ mkdir -p "$LOGS" "$TICKETS"
 
 die() { echo "[ERROR] $*" >&2; exit 1; }
 
+# Локальный бинарник: на нём работают брокер и меню оператора (Linux/arm64).
 find_exe() {
   local c
-  for c in "$ROOT/FastAgent/fastagent" "$ROOT/FastAgent/fastagent-linux-arm64" "$ROOT/fastagent.exe"; do
+  for c in "$ROOT/FastAgent/fastagent" "$ROOT/FastAgent/fastagent-linux-arm64"; do
     [[ -f "$c" ]] || continue
     if [[ ! -x "$c" ]]; then chmod +x "$c" 2>/dev/null || true; fi
     [[ -x "$c" ]] && { echo "$c"; return 0; }
+  done
+  return 1
+}
+
+# Бинарник ДЛЯ КЛИЕНТА — только Windows PE (первые два байта "MZ").
+# Если клиенту ушёл ELF под именем .exe, Windows отвечает «невозможно
+# запустить это приложение на вашем ПК» (0xc0000033) — это и случилось.
+is_pe() { [[ -f "$1" ]] && [[ "$(head -c 2 "$1")" == "MZ" ]]; }
+
+win_exe() {
+  local c
+  for c in "$ROOT/FastAgent/fastagent.exe" "$ROOT/fastagent.exe" "$ROOT/FieldKit/fastagent.exe"; do
+    is_pe "$c" && { echo "$c"; return 0; }
   done
   return 1
 }
@@ -57,12 +71,13 @@ secret() {
 }
 
 exe() { find_exe || die "нет FastAgent/fastagent — соберите: bash scripts/build-fast-agent.sh fast"; }
+ticket_exe() { win_exe || die "нет Windows-бинарника fastagent.exe для клиента (FastAgent/fastagent.exe) — соберите: bash scripts/build-fast-agent.sh fast"; }
 
 broker_running() { port_busy && [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; }
 
 start_broker() {
-  local e s pid
-  e="$(exe)"; s="$(secret)"
+  local e s t pid
+  e="$(exe)"; s="$(secret)"; t="$(ticket_exe)"
 
   if port_busy; then
     pid="$(port_pid || true)"
@@ -78,7 +93,7 @@ start_broker() {
 
   echo "[*] запускаю брокер: 127.0.0.1:${PORT}, журнал $BROKER_LOG"
   setsid nohup "$e" -broker -broker-addr "127.0.0.1:${PORT}" \
-      -broker-secret "$s" -ticket-exe "$e" >>"$BROKER_LOG" 2>&1 &
+      -broker-secret "$s" -ticket-exe "$t" >>"$BROKER_LOG" 2>&1 &
   pid=$!
   echo "$pid" > "$PID_FILE"
 
@@ -97,6 +112,7 @@ cmd_status() {
   local pid
   echo "каталог:  $ROOT"
   echo "бинарник: $(find_exe || echo 'НЕТ')"
+  echo "клиенту:  $(win_exe || echo 'НЕТ fastagent.exe (PE)')"
   echo "секрет:   $SECRET_FILE$([[ -s "$SECRET_FILE" ]] && echo ' (есть)' || echo ' (будет создан)')"
   echo "билеты:   $TICKETS"
   if port_busy; then
@@ -107,7 +123,14 @@ cmd_status() {
   fi
   local last
   last="$(ls -t "$TICKETS"/fastagent-*.exe 2>/dev/null | head -1 || true)"
-  [[ -n "$last" ]] && echo "последний файл-билет: $last"
+  if [[ -n "$last" ]]; then
+    if is_pe "$last"; then
+      echo "последний файл-билет: $last (Windows PE — годится клиенту)"
+    else
+      echo "последний файл-билет: $last"
+      echo "[!] это НЕ Windows-программа (не PE) — клиент скажет «невозможно запустить». Нужен новый билет: remote clean && remote"
+    fi
+  fi
   return 0
 }
 
@@ -141,6 +164,10 @@ cmd_ticket() {
     exit 1
   fi
   echo "$t"
+  if ! is_pe "$t"; then
+    echo "[!] этот билет — не Windows-программа (не PE): клиент покажет «невозможно запустить»." >&2
+    echo "    создайте свежий: remote   (файл-билет теперь берётся из fastagent.exe)" >&2
+  fi
   [[ -n "$dest" ]] || return 0
   [[ -d "$dest" ]] || die "нет каталога: $dest"
   cp -f "$t" "$dest/" || die "не удалось скопировать в $dest"
@@ -163,15 +190,15 @@ cmd_clean() {
 }
 
 cmd_new() {
-  local e s
-  e="$(exe)"; s="$(secret)"
+  local e s t
+  e="$(exe)"; s="$(secret)"; t="$(ticket_exe)"
   start_broker >/dev/null
   echo "[i] секрет: $SECRET_FILE — руками не нужен"
   echo "[i] приглашение клиенту: «Сохраните файл и запустите двойным щелчком, окно не закрывайте»."
   echo "[i] файл-билет появится в $TICKETS — его и отправляйте в AnyDesk."
   echo
   exec "$e" -remote new -broker-url "$URL" -broker-secret "$s" \
-      -ticket-exe "$e" -memory-dir "${MEMORY_DIR:-$HOME/memory}" "$@"
+      -ticket-exe "$t" -memory-dir "${MEMORY_DIR:-$HOME/memory}" "$@"
 }
 
 

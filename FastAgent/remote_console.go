@@ -847,6 +847,7 @@ func remoteTicketFile(cfg Config, code string) (string, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
+	var notPE []string
 	for _, c := range candidates {
 		if c == "" {
 			continue
@@ -855,14 +856,27 @@ func remoteTicketFile(cfg Config, code string) (string, error) {
 		if rerr != nil {
 			continue
 		}
+		// Клиент — Windows. Если билетом уйдёт ELF (linux-бинарник оператора),
+		// Windows скажет «невозможно запустить это приложение на вашем ПК»
+		// (0xc0000033), и оператор узнает об этом только по звонку клиента.
+		if !isPEFile(data) {
+			notPE = append(notPE, c)
+			continue
+		}
 		dst := filepath.Join(dir, "fastagent-"+code+".exe")
 		if werr := os.WriteFile(dst, data, 0o755); werr != nil {
 			return "", werr
 		}
 		return dst, nil
 	}
+	if len(notPE) > 0 {
+		return "", fmt.Errorf("файл-билет не Windows-программа (не PE): %v — клиент не запустит такой файл; нужен fastagent.exe (remote.ticket_exe)", notPE)
+	}
 	return "", fmt.Errorf("не найден exe для файла-билета (задайте remote.ticket_exe)")
 }
+
+// isPEFile — первая пара байт "MZ": то, что Windows согласится запустить.
+func isPEFile(data []byte) bool { return len(data) >= 2 && data[0] == 'M' && data[1] == 'Z' }
 
 // remoteListenEvents — SSE-поток от брокера в канал; при обрыве переподключаемся.
 func remoteListenEvents(base, code, secret string, out chan<- remoteEvent) {
